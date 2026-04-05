@@ -6,7 +6,8 @@
     "build": "next build",
     "start": "next start",
     "db:schema": "psql -d housemind -f src/db/schema.sql",
-    "db:seed": "node src/db/seed.mjs"
+    "db:seed": "node src/db/seed.mjs",
+    "test": "node --test 'tests/*.test.mjs'"
   },
   "dependencies": {
     "jose": "^6.2.2",
@@ -20,8 +21,10 @@
     "@types/node": "^25.5.2",
     "@types/pg": "^8.20.0",
     "@types/react": "^19.2.14",
+    "@vitejs/plugin-react": "^4.7.0",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "vitest": "^3.2.4"
   }
 }
