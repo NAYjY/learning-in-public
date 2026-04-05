@@ -1,0 +1,12 @@
+{
+  "name": "multi-agent-leadership",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node agents/run.js",
+    "meeting": "node agents/run.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
+}
