@@ -255,9 +255,34 @@ Your job:
   },
 };
 
+// ─── Truncate text to stay within token budget ───
+function truncate(text, maxChars = 3000) {
+  if (text.length <= maxChars) return text;
+  return text.slice(0, maxChars) + "\n\n... [truncated — full report in team-report.md] ...";
+}
+
+// ─── Rate limit pacer ───
+// Free tier: ~15 req/min. Space calls ~12s apart to stay safe.
+const CALL_DELAY_MS = 12_000;
+let lastCallTime = 0;
+
+async function paceCall() {
+  const now = Date.now();
+  const elapsed = now - lastCallTime;
+  if (lastCallTime > 0 && elapsed < CALL_DELAY_MS) {
+    const wait = CALL_DELAY_MS - elapsed;
+    const secs = Math.ceil(wait / 1000);
+    process.stdout.write(`  [pacing — ${secs}s cooldown]`);
+    await new Promise((r) => setTimeout(r, wait));
+    process.stdout.write("\r" + " ".repeat(40) + "\r");
+  }
+  lastCallTime = Date.now();
+}
+
 // ─── LLM call with retry ───
 async function chat(systemPrompt, messages, maxTokens = 2000) {
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 7; attempt++) {
+    await paceCall();
     try {
       const response = await client.chat.completions.create({
         model: "gpt-4o",
@@ -269,10 +294,18 @@ async function chat(systemPrompt, messages, maxTokens = 2000) {
       });
       return response.choices[0].message.content;
     } catch (err) {
-      if (err.status === 429 && attempt < 4) {
-        const wait = (attempt + 1) * 15;
+      if (err.status === 429 && attempt < 6) {
+        const wait = (attempt + 1) * 20;
         console.log(`  [rate limited — waiting ${wait}s...]`);
         await new Promise((r) => setTimeout(r, wait * 1000));
+        lastCallTime = Date.now(); // reset pacer after long wait
+      } else if (err.status === 413 && attempt < 6) {
+        // Token limit — truncate messages and retry
+        console.log(`  [token limit hit — truncating and retrying...]`);
+        messages = messages.map((m) => ({
+          ...m,
+          content: truncate(m.content, Math.floor(m.content.length * 0.6)),
+        }));
       } else {
         throw err;
       }
@@ -297,7 +330,7 @@ function getOtherTeamReports(currentTeamKey) {
 function formatCrossTeamContext(otherReports) {
   if (otherReports.length === 0) return "";
   const sections = otherReports
-    .map((r) => `--- ${r.name} Team Report ---\n${r.content}`)
+    .map((r) => `--- ${r.name} Report (summary) ---\n${truncate(r.content, 2000)}`)
     .join("\n\n");
   return `\n\nCONTEXT FROM OTHER DEPARTMENTS (read this before starting):\n${sections}\n\n`;
 }
@@ -359,7 +392,7 @@ Be specific. Give each agent clear instructions. If there are reports from other
     // Build context from previous agent outputs
     let previousContext = "";
     for (const [prevKey, prevOutput] of Object.entries(outputs)) {
-      previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${prevOutput}\n`;
+      previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${truncate(prevOutput, 1500)}\n`;
     }
 
     const agentPrompt = previousContext
@@ -381,7 +414,7 @@ Be specific. Give each agent clear instructions. If there are reports from other
 
   let allOutputs = "";
   for (const [agentKey, output] of Object.entries(outputs)) {
-    allOutputs += `\n## ${team.agents[agentKey].name} Output:\n${output}\n\n---\n`;
+    allOutputs += `\n## ${team.agents[agentKey].name} Output:\n${truncate(output, 1000)}\n\n---\n`;
   }
 
   const finalReport = await chat(team.head.system, [
