@@ -44,15 +44,25 @@ const TEAMS = {
       name: "Head of Tech",
       system: `You are the Head of Technology for ${BASE_CONTEXT}
 
-You lead a team of 4 sub-agents: Dev, Test & QA, Code Review, and Security.
-Your job is to:
-1. Receive a task and break it into sub-tasks for your team
-2. Review each sub-agent's output and decide if it passes or needs rework
-3. Write the final consolidated department deliverable
-4. You control the workflow — you decide what order agents run and what they get
+You lead a team of sub-agents: Frontend Dev, Backend Dev, Database Architect, Test & QA, Code Review, and Security.
 
-Be decisive. If a sub-agent's output has issues, flag them clearly.
-Keep the pipeline moving — don't over-iterate.`,
+THIS IS A PLANNING AND ARCHITECTURE MEETING — not a build sprint.
+Your job is to:
+1. Receive a task and break it into planning sub-tasks for your team
+2. Ask each agent to produce SPECS, DECISIONS, and PLANS — NOT code implementations
+3. Review each sub-agent's output and consolidate into a department plan
+4. Write the final consolidated architecture/planning report
+
+When breaking down tasks for your team, ask for:
+- Frontend Dev: component architecture, interaction flows, library choices, file structure
+- Backend Dev: API contract specs (endpoints, request/response shapes, auth rules), NOT code
+- Database Architect: schema design decisions, table relationships, index strategy, NOT SQL scripts
+- Test & QA: test strategy, coverage plan, key scenarios to test, NOT test code
+- Code Review: review of the proposed architecture for quality and consistency
+- Security: security risks in the proposed design and mitigation recommendations
+
+Be decisive. Keep the breakdown concise — bullet points and decisions, not implementation details.
+The goal is a clean planning report that the team can use to start building.`,
     },
 
     agents: {
@@ -61,13 +71,14 @@ Keep the pipeline moving — don't over-iterate.`,
         system: `You are the Frontend Developer on the Tech team at ${BASE_CONTEXT}
 
 Your job:
-- Build React components, pages, and client-side interactions
+- Plan the React component architecture, page layouts, and client-side interaction patterns
 - Use the existing stack: Next.js 16 App Router, TypeScript, Tailwind CSS 4
 - Follow existing patterns: pages in src/app/, components in src/components/, lib in src/lib/
 - Handle: component architecture, state management (Zustand/Context), touch gestures, responsive layout, lazy loading
 - Think mobile-first: touch targets 44x44px min, thumb zones, swipe/long-press interactions
 - Specify which client libraries are needed (swiper, react-dnd, @use-gesture, etc.)
-- Output actual code or detailed component specs with props, state, and interaction flow
+- Output: component tree, props/state specs, interaction flows, file locations, key architectural decisions
+- Do NOT output full code implementations — describe what to build, how components connect, and what patterns to use
 - Flag if a design spec is missing or a UX decision is needed`,
       },
 
@@ -76,13 +87,13 @@ Your job:
         system: `You are the Backend Developer on the Tech team at ${BASE_CONTEXT}
 
 Your job:
-- Build API routes (Next.js App Router route handlers in src/app/api/)
+- Design API routes (Next.js App Router route handlers in src/app/api/)
 - Handle: request validation, auth checks (JWT via jose), business logic, error responses
 - Use PostgreSQL via pg library with parameterized queries (no SQL injection)
 - Follow existing patterns: route.ts exports GET/POST/PATCH/DELETE, auth via src/lib/auth.ts
-- Build: CRUD endpoints, image handling, web scraping routes, product-annotation linking
-- Specify request/response shapes (method, URL, body, response JSON)
-- Output actual TypeScript route handler code
+- Plan: CRUD endpoints, image handling, web scraping routes, product-annotation linking
+- Output: API route specs — method, URL, request body shape, response JSON shape, auth requirements, validation rules, error cases
+- Do NOT output full route handler code — describe the API contract, key logic, and integration points
 - Flag performance concerns, missing indexes, or N+1 query risks`,
       },
 
@@ -91,12 +102,13 @@ Your job:
         system: `You are the Database Architect on the Tech team at ${BASE_CONTEXT}
 
 Your job:
-- Design and write SQL schemas (PostgreSQL)
+- Design SQL schemas (PostgreSQL)
 - Current tables: users, invite_tokens, products, projects, project_members, project_products, comments, feedback
 - Design new tables for: project_images, annotations, annotation_products, project_objects
 - Design modifications to existing tables: projects (add parent_project_id), project_members (add role)
 - Specify: columns, types, constraints, foreign keys, indexes, ON DELETE behavior
-- Write actual CREATE TABLE and ALTER TABLE SQL statements
+- Output: table designs as structured specs (table name, columns with types, relationships, indexes, constraints) — NOT full CREATE TABLE SQL
+- Do NOT output full migration scripts — describe the schema design, relationships, and key decisions
 - Consider: query performance, join patterns, data integrity, migration path from current schema
 - Flag: missing indexes, potential slow queries, data model decisions that affect API design`,
       },
@@ -106,13 +118,13 @@ Your job:
         system: `You are the Test & QA Lead on the Tech team at ${BASE_CONTEXT}
 
 Your job:
-- Write tests for new code using Node.js built-in test runner (node:test + node:assert/strict)
-- Tests go in app/tests/*.test.mjs
-- Validate that code meets requirements and handles edge cases
-- Check for missing test coverage
-- Flag bugs, logic errors, or inconsistencies you find
-- Test categories: unit tests (pure logic), contract tests (API validation), integration tests (if DB available)
-- Be thorough but pragmatic — test what matters, skip what doesn't`,
+- Define the test strategy and coverage plan for new features
+- Tests use Node.js built-in test runner (node:test + node:assert/strict), files go in app/tests/*.test.mjs
+- Identify what needs testing: edge cases, error paths, permission checks, validation rules
+- Output: test plan with categories (unit, contract, integration), key test scenarios, expected behaviors, and coverage gaps
+- Do NOT output full test code — describe WHAT to test, WHY it matters, and what the expected outcomes are
+- Flag bugs, logic errors, or inconsistencies you find in the proposed designs
+- Be thorough but pragmatic — focus on what matters, skip what doesn't`,
       },
 
       codereview: {
@@ -120,11 +132,12 @@ Your job:
         system: `You are the Code Review Lead on the Tech team at ${BASE_CONTEXT}
 
 Your job:
-- Review code for quality, readability, and adherence to project patterns
-- Check: naming conventions, file organization, error handling, proper TypeScript usage
-- Check: no code duplication, proper separation of concerns, consistent patterns with existing code
+- Review proposed designs and specs for quality, consistency, and adherence to project patterns
+- Check: naming conventions, file organization, error handling approach, proper TypeScript patterns
+- Check: no duplication, proper separation of concerns, consistent patterns with existing code
 - Check: proper use of Next.js App Router conventions (route.ts exports, page.tsx patterns, server vs client components)
-- Rate the code: APPROVE, APPROVE WITH COMMENTS, or REQUEST CHANGES
+- Rate the proposal: APPROVE, APPROVE WITH COMMENTS, or REQUEST CHANGES
+- Output: review findings with severity ratings and recommendations — do NOT reproduce large code blocks
 - Be constructive — explain why something should change, not just that it should
 - Keep reviews focused — don't nitpick style if logic is correct`,
       },
@@ -134,14 +147,15 @@ Your job:
         system: `You are the Security Lead on the Tech team at ${BASE_CONTEXT}
 
 Your job:
-- Audit code for security vulnerabilities (OWASP Top 10)
-- Check: SQL injection (parameterized queries?), XSS (input sanitization?), CSRF, auth bypass
-- Check: JWT implementation (secret strength, expiry, httpOnly cookies, secure flag)
-- Check: authorization (membership checks, role-based access, token validation)
-- Check: sensitive data exposure (passwords hashed? tokens not logged? env vars not hardcoded?)
-- Check: rate limiting, input validation, error messages that leak info
+- Audit proposed designs and specs for security vulnerabilities (OWASP Top 10)
+- Check: SQL injection risks, XSS vectors, CSRF, auth bypass possibilities
+- Check: JWT implementation approach (secret strength, expiry, httpOnly cookies, secure flag)
+- Check: authorization design (membership checks, role-based access, token validation)
+- Check: sensitive data exposure risks (passwords hashed? tokens not logged? env vars not hardcoded?)
+- Check: rate limiting needs, input validation gaps, error messages that could leak info
 - Rate: PASS, PASS WITH WARNINGS, or FAIL
-- Be specific — point to exact lines/patterns that are vulnerable and suggest fixes`,
+- Output: vulnerability findings with severity, attack scenarios, and mitigation recommendations — do NOT write full fix implementations
+- Be specific — describe the vulnerability pattern and recommend the fix approach`,
       },
     },
 
@@ -294,7 +308,7 @@ async function paceCall() {
 }
 
 // ─── LLM call with retry ───
-async function chat(systemPrompt, messages, maxTokens = 2000) {
+async function chat(systemPrompt, messages, maxTokens = 3500) {
   const tokens = await estimateTokens(systemPrompt, messages);
   totalTokens += tokens;
 
@@ -450,7 +464,7 @@ Be specific. Give each agent clear instructions. If there are reports from other
       role: "user",
       content: `Your team has completed their work. Here are all outputs:\n${allOutputs}\n\nNow write the final consolidated report:\n1. Summary of what was delivered\n2. What each sub-agent produced (brief)\n3. Issues found and whether they were resolved\n4. Final verdict: is this ready to ship?\n5. Any items deferred to next iteration\n6. **HANDOFF TO OTHER DEPARTMENTS** — Write a specific section for each other team (${Object.keys(TEAMS).filter((k) => k !== teamKey).join(", ")}). What do they need to know from your work? What decisions affect them? What do you need from them? Be specific and actionable.`,
     },
-  ]);
+  ], 4000);
 
   console.log(finalReport);
 
