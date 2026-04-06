@@ -1,0 +1,92 @@
+╔══════════════════════════════════════════════════════════════════╗
+║         DIAGRAM 1: CURRENT NEXT.JS APP STRUCTURE               ║
+║         "HouseMind" — app/src/                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        PAGES (UI)                               │
+│                                                                 │
+│  /                    Landing page                              │
+│  /login               Email + password                          │
+│  /invite?token=...    Accept invite, create account             │
+│  /catalog             Product grid (4 categories, badges)       │
+│  /projects            List + create project boards              │
+│  /projects/[id]       Board: pinned products + comments         │
+│                                                                 │
+│  Components:                                                    │
+│  └── feedback-widget  Fixed-position feedback form              │
+│  └── product-grid     Client-side category filter + grid        │
+└─────────────┬───────────────────────────────────────────────────┘
+              │ fetch()
+              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      API ROUTES                                 │
+│                                                                 │
+│  POST /api/auth/invite         Admin creates invite token       │
+│  POST /api/auth/accept-invite  User accepts, scrypt hash pw     │
+│  POST /api/auth/login          Email/password → JWT cookie      │
+│                                                                 │
+│  GET  /api/products            List (optional ?category=)       │
+│  POST /api/products/[id]/request  Increment availability count  │
+│                                                                 │
+│  GET  /api/projects            List user's projects             │
+│  POST /api/projects            Create project                   │
+│  GET  /api/projects/[id]       Detail + products + comments     │
+│                                                                 │
+│  POST /api/comments            Add comment (membership check)   │
+│  POST /api/feedback            Anonymous feedback               │
+└─────────────┬───────────────────────────────────────────────────┘
+              │ pg.query()
+              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      DATABASE (PostgreSQL)                      │
+│                                                                 │
+│  users              id, name, email, password_hash, role        │
+│  invite_tokens      id, token, email, role, used, created_by    │
+│  products           id, name, category, image_url, description, │
+│                     status (reference/available), requests      │
+│  projects           id, name, description, created_by           │
+│  project_members    id, project_id, user_id                     │
+│  project_products   id, project_id, product_id                  │
+│  comments           id, project_id, user_id, body               │
+│  feedback           id, page, message, created_at               │
+│                                                                 │
+│  Total: 7 tables    (flat structure, no hierarchy)              │
+└─────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      AUTH FLOW                                  │
+│                                                                 │
+│  Admin → /api/auth/invite → sends link → user clicks →         │
+│  /invite?token=xxx → creates account → /api/auth/login →       │
+│  JWT cookie (jose, HS256, 7-day, httpOnly, secure)              │
+│                                                                 │
+│  Roles: stored in users.role but NOT enforced per-project       │
+│  Membership: project_members (binary: member or not)            │
+└─────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    WHAT'S HERE                                  │
+│                                                                 │
+│  ✓ Invite-only auth (architect-first gate)                      │
+│  ✓ Curated product catalog with categories                      │
+│  ✓ Reference vs Available labeling                              │
+│  ✓ Request Availability button (demand tracking)                │
+│  ✓ Project boards with pinned products                          │
+│  ✓ Role-colored comments (architect=blue, homeowner=purple)     │
+│  ✓ Anonymous feedback widget                                    │
+│  ✓ TypeScript + Tailwind + modern stack                         │
+│  ✓ 23 tests passing                                             │
+│                                                                 │
+│                    WHAT'S MISSING                                │
+│                                                                 │
+│  ✗ Image carousel (add/browse reference images)                 │
+│  ✗ Annotation system (pin emoji markers on images)              │
+│  ✗ Annotation → product linking                                 │
+│  ✗ Hierarchical projects (main → sub)                           │
+│  ✗ Per-project roles (Owner/Editor/ReadOnly)                    │
+│  ✗ Web scraping / image search                                  │
+└─────────────────────────────────────────────────────────────────┘

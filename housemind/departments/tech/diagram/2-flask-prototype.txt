@@ -1,0 +1,147 @@
+╔══════════════════════════════════════════════════════════════════╗
+║         DIAGRAM 2: FLASK PROTOTYPE STRUCTURE                   ║
+║         "Memo: Visual Reference Notebook" — figmaTem/          ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                        PAGES (UI)                               │
+│                                                                 │
+│  /                    Project list (select/create main project) │
+│  /working             THE workspace — everything happens here   │
+│                                                                 │
+│  figma.html = single page with ALL interactions:                │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  Hero: "Memo — Visual Reference Notebook"               │    │
+│  │                                                         │    │
+│  │  ┌── Project Nav ──────────────────────────────────┐    │    │
+│  │  │  Main Project: "NEW HOUSE"                      │    │    │
+│  │  │  └── Subprojects dropdown: Kitchen, Bathroom... │    │    │
+│  │  │  └── [Add Sub] button                           │    │    │
+│  │  └─────────────────────────────────────────────────┘    │    │
+│  │                                                         │    │
+│  │  ┌── Image Carousel ──────────────────────────────┐    │    │
+│  │  │  ◀ [reference image 1] [image 2] [image 3] ▶   │    │    │
+│  │  │    swipe (Hammer.js) + prev/next buttons        │    │    │
+│  │  │    + add image URL input                        │    │    │
+│  │  │                                                 │    │    │
+│  │  │    ★ LONG PRESS on image → emoji menu appears   │    │    │
+│  │  │    ★ Select emoji → marker pinned at x,y %      │    │    │
+│  │  │    ★ Drag marker to reposition                  │    │    │
+│  │  │    ★ Right-click marker to delete               │    │    │
+│  │  │    ★ Double-click marker → add product form     │    │    │
+│  │  └─────────────────────────────────────────────────┘    │    │
+│  │                                                         │    │
+│  │  ┌── Emoji Menu (circular, 8 types) ──────────────┐    │    │
+│  │  │  😊 ⭐ ❤️ 📷 🌸 🗺️ 💰 🏷️                       │    │    │
+│  │  │  Each = annotation category (object type)       │    │    │
+│  │  │  Fans left/right based on tap position          │    │    │
+│  │  └─────────────────────────────────────────────────┘    │    │
+│  │                                                         │    │
+│  │  ┌── Product Grid ────────────────────────────────┐    │    │
+│  │  │  Shows products linked to current image's       │    │    │
+│  │  │  annotations only                               │    │    │
+│  │  │  Click annotation → its products sort to top    │    │    │
+│  │  │  [Add Product] → modal with:                    │    │    │
+│  │  │    - paste URL → scrape images (BeautifulSoup)  │    │    │
+│  │  │    - pick image from scraped results             │    │    │
+│  │  │    - title, size, contact fields                │    │    │
+│  │  └─────────────────────────────────────────────────┘    │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────┬───────────────────────────────────────────────────┘
+              │ fetch() — vanilla JS
+              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  FLASK API (Blueprints)                         │
+│                                                                 │
+│  /user/login           Session login (30-day keep-logged-in)    │
+│  /user/register        Create account (User/Supplier/admin)     │
+│  /user/logout          Kill session                             │
+│                                                                 │
+│  /projects/<id>            Get project + subprojects            │
+│  /projects/user/<auth_id>  User's main projects                 │
+│  /projects/maincreate      Create main project                  │
+│  /projects/create_sub      Create subproject                    │
+│  /projects/carousel_images/<id>  Get project images             │
+│                                                                 │
+│  /products/get/<project_id>   Products for project              │
+│  /products/add                Add product to project            │
+│  /products/delete/<id>/<pid>  Delete product                    │
+│  /products/get-images         Scrape images from URL            │
+│                                                                 │
+│  /annotations/add/<imageID>      Place annotation (x,y,emoji)   │
+│  /annotations/move/<id>          Reposition annotation          │
+│  /annotations/get/<image_id>     Get all for image              │
+│  /annotations/delete/<id>        Remove annotation              │
+│                                                                 │
+│  /imgRef/upload_image/<pid>      Add image URL to carousel      │
+│  /google_search/google_search    Google Custom Search API       │
+│  /admin/traffic                  Traffic log viewer             │
+└─────────────┬───────────────────────────────────────────────────┘
+              │ sqlite3
+              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    DATABASE (SQLite)                            │
+│                                                                 │
+│  Auth                 AuthID, Username, Password, UserType      │
+│  Sessions             SessionID, AuthID, ExpiresAt              │
+│  TrafficLog           LogID, AuthID, PageName, Timestamp        │
+│  Projects             ProjectID, AuthID, Name, Desc,            │
+│                       ParentProjectID ← HIERARCHY               │
+│  SharedProjects       SharedID, ProjectID, AuthID, UserType     │
+│                       ← PER-PROJECT ROLES (Owner/Editor/RO)    │
+│  ProjectImages        ImageID, ProjectID, ImageURL              │
+│  ProjectObjects       ObjectID, ProjectID, ObjectNumber         │
+│  ImageAnnotations     AnnotationID, ObjectID, ImageID,          │
+│                       X%, Y%, Comment                           │
+│  ProjectProducts      ProjectProductID, ObjectID, ProjectID,    │
+│                       ProductID, Comment, ImgSrc                │
+│                                                                 │
+│  Total: 9 tables    (hierarchical, annotation-driven)           │
+└─────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    THE CORE INTERACTION LOOP                    │
+│                                                                 │
+│  1. Add image to project carousel (URL)                         │
+│  2. Long-press on image → emoji menu                            │
+│  3. Pick emoji → annotation pinned at that spot                 │
+│  4. Double-click annotation → add product form                  │
+│  5. Paste product URL → scrape images → pick one                │
+│  6. Product linked to annotation (emoji type)                   │
+│  7. Product grid shows products for current image's markers     │
+│  8. Click annotation → its products sort to top                 │
+│                                                                 │
+│  image → pin → product → browse by pin                          │
+│                                                                 │
+│  THIS is what makes the app special.                            │
+│  The Next.js app doesn't have any of this yet.                  │
+└─────────────────────────────────────────────────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    WHAT'S HERE                                  │
+│                                                                 │
+│  ✓ Full annotation system (pin/drag/delete/link)                │
+│  ✓ Image carousel with swipe                                    │
+│  ✓ Annotation → product pipeline                                │
+│  ✓ Hierarchical projects (main + sub)                           │
+│  ✓ Per-project roles (Owner/Editor/ReadOnly)                    │
+│  ✓ Web scraping for product images                              │
+│  ✓ Google Custom Search                                         │
+│  ✓ Thai font support (Prompt)                                   │
+│                                                                 │
+│                    WHAT'S MISSING                                │
+│                                                                 │
+│  ✗ No invite-only auth gate                                     │
+│  ✗ No curated product catalog                                   │
+│  ✗ No reference/available labeling                              │
+│  ✗ No Request Availability                                      │
+│  ✗ No role-colored comments                                     │
+│  ✗ No feedback widget                                           │
+│  ✗ No tests                                                     │
+│  ✗ No TypeScript (vanilla JS only)                              │
+│  ✗ No modern CSS framework                                      │
+│  ✗ SQLite only (not production-ready)                           │
+└─────────────────────────────────────────────────────────────────┘

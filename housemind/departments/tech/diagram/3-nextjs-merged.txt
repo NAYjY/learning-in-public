@@ -1,0 +1,196 @@
+╔══════════════════════════════════════════════════════════════════╗
+║         DIAGRAM 3: NEXT.JS + CORE INTERACTION (MERGED)         ║
+║         What it looks like if we port the Flask magic           ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+                    ⚠️  WARNING: THIS IS THE MESS ⚠️
+
+     Adding annotation system to current Next.js means touching
+     almost every layer: new pages, new API routes, new tables,
+     new client-side libs, new interactions. Here's the full picture.
+
+
+┌─────────────────────────────────────────────────────────────────┐
+│                     PAGES (UI) — 8 pages                        │
+│                                                                 │
+│  EXISTING (unchanged):                                          │
+│  /                    Landing page                              │
+│  /login               Email + password                          │
+│  /invite?token=...    Accept invite                             │
+│  /catalog             Product catalog grid                      │
+│                                                                 │
+│  MODIFIED:                                                      │
+│  /projects            + show parent/child hierarchy             │
+│  /projects/[id]       + carousel + annotations + product links  │
+│                       (this page becomes MASSIVE)               │
+│                                                                 │
+│  NEW components needed:                                         │
+│  └── image-carousel.tsx      Swiper/react-slick, add URL input  │
+│  └── annotation-layer.tsx    Canvas overlay, emoji markers,     │
+│  │                           drag (react-dnd), x/y % coords    │
+│  └── emoji-menu.tsx          Circular radial menu, 8 types      │
+│  └── annotation-product-     Modal: scrape URL → pick image →   │
+│  │   modal.tsx               title/size/contact form            │
+│  └── product-panel.tsx       Filtered by annotation, sort by    │
+│  │                           active marker                      │
+│  └── project-tree.tsx        Parent → subproject navigation     │
+│  └── feedback-widget.tsx     (already exists)                   │
+│                                                                 │
+│  Client-side libraries to add:                                  │
+│  + swiper or react-slick     (carousel)                         │
+│  + react-dnd or react-draggable (annotation drag)               │
+│  + hammer.js or @use-gesture (touch: long-press, swipe)         │
+└─────────────┬───────────────────────────────────────────────────┘
+              │ fetch()
+              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  API ROUTES — 9 existing + 7 new                │
+│                                                                 │
+│  EXISTING (unchanged):                                          │
+│  POST /api/auth/invite                                          │
+│  POST /api/auth/accept-invite                                   │
+│  POST /api/auth/login                                           │
+│  GET  /api/products                                             │
+│  POST /api/products/[id]/request                                │
+│  POST /api/comments                                             │
+│  POST /api/feedback                                             │
+│                                                                 │
+│  MODIFIED:                                                      │
+│  GET  /api/projects           + hierarchy (parent_id filter)    │
+│  POST /api/projects           + parent_project_id field         │
+│  GET  /api/projects/[id]      + images + annotations + roles    │
+│                                                                 │
+│  NEW routes:                                                    │
+│  POST /api/projects/[id]/images         Add image URL           │
+│  GET  /api/projects/[id]/images         List carousel images    │
+│  POST /api/images/[id]/annotations      Create annotation       │
+│  PATCH /api/annotations/[id]            Move annotation (x,y)   │
+│  DELETE /api/annotations/[id]           Delete annotation       │
+│  POST /api/annotations/[id]/products    Link product            │
+│  POST /api/scrape-images                Scrape URL for images   │
+│                                                                 │
+│  Total: 16 routes (was 9)                                       │
+└─────────────┬───────────────────────────────────────────────────┘
+              │ pg.query()
+              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  DATABASE — 7 existing + 4 new tables           │
+│                                                                 │
+│  EXISTING (unchanged):                                          │
+│  users, invite_tokens, products, comments, feedback             │
+│                                                                 │
+│  MODIFIED:                                                      │
+│  projects         + parent_project_id (nullable FK → self)      │
+│  project_members  + role (owner/editor/readonly)                │
+│                                                                 │
+│  NEW tables:                                                    │
+│  project_images       id, project_id, image_url, position       │
+│  annotations          id, image_id, object_type (emoji),        │
+│                       x_pct, y_pct, created_by                  │
+│  annotation_products  id, annotation_id, title, image_url,      │
+│                       size, contact, description                │
+│  project_objects      id, project_id, object_number             │
+│                       (links emoji type to numbered category)   │
+│                                                                 │
+│  Total: 11 tables (was 7)                                       │
+│  + indexes on project_images(project_id),                       │
+│    annotations(image_id), annotation_products(annotation_id)    │
+└─────────────────────────────────────────────────────────────────┘
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║                    COMPLEXITY COMPARISON                         ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  Metric              Now        Flask      Merged     Delta     ║
+║  ──────────────────  ─────────  ─────────  ─────────  ────────  ║
+║  Pages               6          2          8          +2        ║
+║  Components          2          0 (inline) 8          +6        ║
+║  API routes          9          16         16         +7        ║
+║  DB tables           7          9          11         +4        ║
+║  Client libs         0          2          3-4        +3-4     ║
+║  Test suites         3          0          5-6        +2-3     ║
+║  Files total        ~30         ~20        ~50        +20      ║
+║                                                                  ║
+║  /projects/[id] page goes from simple board to a complex         ║
+║  workspace with: carousel + annotation canvas + emoji menu       ║
+║  + product panel + drag-drop + touch gestures + modal forms.     ║
+║                                                                  ║
+║  That single page = ~60% of the new complexity.                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║                    THE RISK                                      ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  /projects/[id]/page.tsx becomes a GOD PAGE:                     ║
+║                                                                  ║
+║  ┌──────────────────────────────────────┐                        ║
+║  │  ProjectDetailPage                   │                        ║
+║  │  ├── ProjectTree (hierarchy nav)     │                        ║
+║  │  ├── ImageCarousel                   │                        ║
+║  │  │   └── AnnotationLayer             │  ← canvas overlay      ║
+║  │  │       ├── EmojiMarker (draggable) │  ← per annotation      ║
+║  │  │       └── EmojiMenu (on press)    │  ← radial popup        ║
+║  │  ├── ProductPanel                    │  ← filtered by pins    ║
+║  │  │   └── AddProductModal             │  ← scrape + form       ║
+║  │  ├── CommentSection                  │  ← existing            ║
+║  │  └── FeedbackWidget                  │  ← existing            ║
+║  └──────────────────────────────────────┘                        ║
+║                                                                  ║
+║  State management: which image is active, which annotations      ║
+║  are visible, which product is highlighted, drag state,          ║
+║  touch state, modal state, carousel position...                  ║
+║                                                                  ║
+║  Options to keep it clean:                                       ║
+║  1. Split into sub-routes: /projects/[id]/board, /images, etc.  ║
+║  2. Use React Context for annotation state                       ║
+║  3. Build annotation layer as separate package/module            ║
+║  4. Accept the complexity — it's the PRODUCT                     ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║                    MIGRATION ORDER (suggested)                   ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  Wave 2A — Foundation (week 1-2):                                ║
+║  ┌─────────────────────────────────────────────────────┐         ║
+║  │ 1. Add parent_project_id to projects table          │         ║
+║  │ 2. Add role to project_members table                │         ║
+║  │ 3. Create project_images table + API                │         ║
+║  │ 4. Build image carousel component                   │         ║
+║  │ 5. Update project nav for hierarchy                 │         ║
+║  └─────────────────────────────────────────────────────┘         ║
+║                                                                  ║
+║  Wave 2B — Annotations (week 3-4):                               ║
+║  ┌─────────────────────────────────────────────────────┐         ║
+║  │ 6. Create annotations + annotation_products tables  │         ║
+║  │ 7. Build annotation API routes (CRUD + move)        │         ║
+║  │ 8. Build annotation canvas overlay component        │         ║
+║  │ 9. Build emoji radial menu component                │         ║
+║  │ 10. Wire up long-press → menu → pin flow            │         ║
+║  └─────────────────────────────────────────────────────┘         ║
+║                                                                  ║
+║  Wave 2C — Product Linking (week 5):                             ║
+║  ┌─────────────────────────────────────────────────────┐         ║
+║  │ 11. Build add-product modal with form               │         ║
+║  │ 12. Build URL image scraper API route               │         ║
+║  │ 13. Wire annotation → product linking               │         ║
+║  │ 14. Build filtered product panel                    │         ║
+║  │ 15. Click annotation → sort products                │         ║
+║  └─────────────────────────────────────────────────────┘         ║
+║                                                                  ║
+║  Wave 2D — Polish + Test (week 6):                               ║
+║  ┌─────────────────────────────────────────────────────┐         ║
+║  │ 16. Touch gestures (mobile swipe, long-press)       │         ║
+║  │ 17. Drag-to-reposition annotations                  │         ║
+║  │ 18. Tests for annotation + hierarchy APIs           │         ║
+║  │ 19. Role-based permission enforcement               │         ║
+║  │ 20. Mobile responsive pass                          │         ║
+║  └─────────────────────────────────────────────────────┘         ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
