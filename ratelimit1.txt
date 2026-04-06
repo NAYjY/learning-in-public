@@ -1,0 +1,47 @@
+GITHUB_TOKEN="" && cd /home/nayjy/Workplace/compare_claen/learning-in-public/housemind && node -e '
+import OpenAI from "openai";
+import * as fs from "fs";
+import * as path from "path";
+
+const client = new OpenAI({
+  baseURL: "https://models.inference.ai.azure.com",
+  apiKey: process.env.GITHUB_TOKEN,
+});
+
+const runDir = "departments/marketing/team-runs/2026-04-06T01-29-54-273Z";
+const agentFiles = ["1-brand.md","2-content.md","3-artui.md","4-ux.md","5-growth.md","6-community.md"];
+const agentNames = ["Brand Strategist","Content Writer","Art & UI Designer","UX Researcher","Growth Lead","Community Manager"];
+const breakdown = fs.readFileSync(path.join(runDir, "0-head-breakdown.md"), "utf-8");
+
+let allOutputs = "";
+for (let i = 0; i < agentFiles.length; i++) {
+  const text = fs.readFileSync(path.join(runDir, agentFiles[i]), "utf-8");
+  const trunc = text.length > 800 ? text.slice(0, 800) + "\n...[truncated]..." : text;
+  allOutputs += "\n## " + agentNames[i] + " Output:\n" + trunc + "\n\n---\n";
+}
+
+const task = "Design the annotation workspace for Phase 1 MVP — brand, content, UI, UX, growth, and community strategy";
+
+console.log("[HEAD] Consolidating team outputs...\n");
+
+const resp = await client.chat.completions.create({
+  model: "gpt-4o",
+  max_tokens: 2000,
+  messages: [
+    { role: "system", content: "You are Head of Marketing at HouseMind. Write concise final reports." },
+    { role: "user", content: "Task: " + task },
+    { role: "assistant", content: breakdown.slice(0, 1500) },
+    { role: "user", content: "Your team completed their work. Outputs:\n" + allOutputs + "\n\nWrite the final consolidated report:\n1. Summary of what was delivered\n2. What each sub-agent produced (brief)\n3. Issues found and whether resolved\n4. Final verdict: ready to ship?\n5. Items deferred\n6. HANDOFF TO OTHER DEPARTMENTS — What does the Tech team need to know?" },
+  ],
+});
+
+const finalReport = resp.choices[0].message.content;
+console.log(finalReport);
+
+// Save
+const reportContent = "# Head of Marketing — Team Run Report\n\n**Date:** " + new Date().toISOString() + "\n**Task:** " + task + "\n\n---\n\n## Head Breakdown\n" + breakdown + "\n\n---\n\n## Final Report\n" + finalReport + "\n";
+
+fs.writeFileSync(path.join(runDir, "final-report.md"), reportContent);
+fs.writeFileSync("departments/marketing/team-report.md", reportContent);
+console.log("\n✓ Saved final-report.md and team-report.md");
+'
