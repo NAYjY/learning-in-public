@@ -5,9 +5,11 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const client = new Anthropic();
+const KEY_FILE = path.join(__dirname, "..", "key.txt");
+const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
+const client = new Anthropic({ apiKey });
 
-const MODEL = "claude-sonnet-4-20250514";
+const MODEL = "claude-sonnet-4-6";
 const COST_PER_1K_INPUT = 0.003;
 let totalTokens = 0;
 
@@ -303,7 +305,7 @@ async function chat(systemPrompt, messages, maxTokens = 2000) {
     await paceCall();
     try {
       const response = await client.messages.create({
-        model: "claude-sonnet-4-20250514",
+        model: MODEL,
         max_tokens: maxTokens,
         system: systemPrompt,
         messages: messages,

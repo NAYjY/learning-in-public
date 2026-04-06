@@ -1,34 +1,23 @@
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 
-const client = new OpenAI({
-  baseURL: "https://models.inference.ai.azure.com",
-  apiKey: process.env.GITHUB_TOKEN,
-});
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const KEY_FILE = path.join(__dirname, "..", "key.txt");
+const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
+const client = new Anthropic({ apiKey });
+
+const MODEL = "6";
 
 async function chat(systemPrompt, messages) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const response = await client.chat.completions.create({
-        model: "gpt-4o",
-        max_tokens: 2000,
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...messages,
-        ],
-      });
-      return response.choices[0].message.content;
-    } catch (err) {
-      if ((err.status === 429 || err.status === 413) && attempt < 4) {
-        const wait = (attempt + 1) * 15;
-        console.log(`  [${err.status === 413 ? "too large" : "rate limited"} — waiting ${wait}s...]`);
-        await new Promise((r) => setTimeout(r, wait * 1000));
-      } else {
-        throw err;
-      }
-    }
-  }
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 4000,
+    system: systemPrompt,
+    messages,
+  });
+  return response.content[0].text;
 }
 
 const SYSTEM = `You are a professional translator. Translate the given report to Thai.

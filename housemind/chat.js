@@ -10,9 +10,11 @@ const TICKETS_FILE = path.join(PM_DIR, "tickets.json");
 const CHAT_LOG_FILE = path.join(PM_DIR, "chat-log.md");
 const HISTORY_FILE = path.join(PM_DIR, "history.json");
 
-const client = new Anthropic();
+const KEY_FILE = path.join(__dirname, "..", "key.txt");
+const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
+const client = new Anthropic({ apiKey });
 
-const MODEL = "claude-sonnet-4-20250514";
+const MODEL = "claude-sonnet-4-6";
 let sessionTokens = 0;
 
 async function estimateTokens(systemPrompt, messages) {
