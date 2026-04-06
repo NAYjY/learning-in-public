@@ -1,14 +1,11 @@
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const client = new OpenAI({
-  baseURL: "https://models.inference.ai.azure.com",
-  apiKey: process.env.GITHUB_TOKEN,
-});
+const client = new Anthropic();
 
 // ─── Base context shared across all HouseMind agents ───
 const BASE_CONTEXT = `HouseMind — a platform connecting architects, contractors, homeowners, and suppliers to visualize and agree on building products for house projects.
@@ -284,15 +281,13 @@ async function chat(systemPrompt, messages, maxTokens = 2000) {
   for (let attempt = 0; attempt < 7; attempt++) {
     await paceCall();
     try {
-      const response = await client.chat.completions.create({
-        model: "gpt-4o",
+      const response = await client.messages.create({
+        model: "claude-sonnet-4-20250514",
         max_tokens: maxTokens,
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...messages,
-        ],
+        system: systemPrompt,
+        messages: messages,
       });
-      return response.choices[0].message.content;
+      return response.content[0].text;
     } catch (err) {
       if (err.status === 429 && attempt < 6) {
         const wait = (attempt + 1) * 20;
