@@ -7,6 +7,19 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const client = new Anthropic();
 
+const MODEL = "claude-sonnet-4-20250514";
+const COST_PER_1K_INPUT = 0.003;
+let totalTokens = 0;
+
+async function estimateTokens(systemPrompt, messages) {
+  const response = await client.messages.countTokens({
+    model: MODEL,
+    system: systemPrompt,
+    messages: messages,
+  });
+  return response.input_tokens;
+}
+
 // ─── Base context shared across all HouseMind agents ───
 const BASE_CONTEXT = `HouseMind — a platform connecting architects, contractors, homeowners, and suppliers to visualize and agree on building products for house projects.
 
@@ -278,6 +291,14 @@ async function paceCall() {
 
 // ─── LLM call with retry ───
 async function chat(systemPrompt, messages, maxTokens = 2000) {
+  const tokens = await estimateTokens(systemPrompt, messages);
+  totalTokens += tokens;
+  console.log(`  [~${tokens} input tokens]`);
+
+  if (DRY_RUN) {
+    return "[dry-run — skipped]";
+  }
+
   for (let attempt = 0; attempt < 7; attempt++) {
     await paceCall();
     try {
@@ -459,6 +480,7 @@ ${finalReport}
   console.log(`  ✓ Team report saved: departments/${teamKey}/team-report.md`);
   console.log(`  ✓ Run artifacts: departments/${teamKey}/team-runs/${timestamp}/`);
   console.log(`${"=".repeat(60)}`);
+  printTokenSummary();
 }
 
 // ─── Scrum: cross-team agent pairing ───
@@ -590,16 +612,27 @@ Any final concerns, agreements, or action items? Keep it brief — 2-3 sentences
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  ✓ Scrum log saved: departments/scrum-logs/scrum-${timestamp}.md`);
   console.log(`${"=".repeat(60)}`);
+  printTokenSummary();
+}
+
+function printTokenSummary() {
+  const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  console.log(`\nTotal input tokens: ~${totalTokens}`);
+  console.log(`Estimated input cost: ~$${cost}`);
 }
 
 // ─── CLI ───
 const args = process.argv.slice(2);
-const teamArg = args[0];
-const taskArg = args.slice(1).join(" ");
+const DRY_RUN = args.includes("--dry-run");
+const filteredArgs = args.filter((a) => a !== "--dry-run");
+const teamArg = filteredArgs[0];
+const taskArg = filteredArgs.slice(1).join(" ");
 
 if (teamArg === "scrum" && taskArg) {
+  if (DRY_RUN) console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
   runScrum(taskArg).catch(console.error);
 } else if (teamArg && taskArg) {
+  if (DRY_RUN) console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
   runTeam(teamArg, taskArg).catch(console.error);
 } else {
   console.log(`
@@ -628,7 +661,8 @@ Scrum pairs:
   Community Manager ↔ UX          (user feedback, complaints, feature priorities)
 
 Examples:
-  node team.js tech "Build the full annotation system — frontend components, API routes, database schema, testing"
+  node team.js tech "Build the full annotation system"
+  node team.js tech --dry-run "Build the full annotation system"   (estimate tokens only)
   node team.js marketing "Design the annotation workspace — brand direction, UI design, UX validation, mobile-first"
   node team.js scrum "Align on the annotation system — does the UI design match what frontend can build?"
 `);

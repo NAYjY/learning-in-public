@@ -7,6 +7,26 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const client = new Anthropic();
 
+const MODEL = "claude-sonnet-4-20250514";
+const COST_PER_1K_INPUT = 0.003;
+let totalTokens = 0;
+
+// CLI
+const args = process.argv.slice(2);
+const DRY_RUN = args.includes("--dry-run");
+const filteredArgs = args.filter((a) => a !== "--dry-run");
+const dept = filteredArgs[0];
+const task = filteredArgs.slice(1).join(" ");
+
+async function estimateTokens(systemPrompt, messages) {
+  const response = await client.messages.countTokens({
+    model: MODEL,
+    system: systemPrompt,
+    messages: messages,
+  });
+  return response.input_tokens;
+}
+
 const DEPARTMENTS = {
   tech: {
     name: "Head of Tech",
@@ -85,6 +105,14 @@ Your job is to:
 };
 
 async function chat(systemPrompt, messages) {
+  const tokens = await estimateTokens(systemPrompt, messages);
+  totalTokens += tokens;
+  console.log(`  [~${tokens} input tokens]`);
+
+  if (DRY_RUN) {
+    return "[dry-run — skipped]";
+  }
+
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const response = await client.messages.create({
@@ -157,6 +185,7 @@ async function runDepartment(deptKey, task) {
   fs.writeFileSync(path.join(deptDir, "report.md"), reportContent);
 
   console.log(`\n✓ Report saved: departments/${deptKey}/report.md`);
+  printTokenSummary();
   return reportFile;
 }
 
@@ -196,12 +225,19 @@ async function runPM() {
   fs.writeFileSync(path.join(pmDir, "report.md"), reportContent);
 
   console.log(`\n✓ PM report saved: departments/pm/report.md`);
+  printTokenSummary();
+}
+
+function printTokenSummary() {
+  const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  console.log(`\nTotal input tokens: ~${totalTokens}`);
+  console.log(`Estimated input cost: ~$${cost}`);
 }
 
 // CLI
-const args = process.argv.slice(2);
-const dept = args[0];
-const task = args.slice(1).join(" ");
+if (DRY_RUN) {
+  console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
+}
 
 if (dept === "pm") {
   runPM().catch(console.error);
@@ -217,6 +253,7 @@ Departments: tech, marketing, operations, pm
 
 Examples:
   node department.js tech "Design the MVP architecture for project boards with invite-only auth"
+  node department.js tech --dry-run "Design the MVP architecture"   (estimate tokens only)
   node department.js marketing "Plan the invite-only beta launch messaging for architects"
   node department.js operations "Build the product catalog curation plan for 100-150 items"
   node department.js pm

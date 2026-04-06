@@ -17,14 +17,38 @@ function log(text) {
 
 const client = new Anthropic();
 
+const args = process.argv.slice(2);
+const DRY_RUN = args.includes("--dry-run");
+let totalTokens = 0;
+
+const MODEL = "claude-sonnet-4-20250514";
+const COST_PER_1K_INPUT = 0.003; // Sonnet input pricing
+
+async function estimateTokens(systemPrompt, messages) {
+  const response = await client.messages.countTokens({
+    model: MODEL,
+    system: systemPrompt,
+    messages: messages,
+  });
+  return response.input_tokens;
+}
+
 const MAX_ROUNDS = 4;
 
 async function chat(agentKey, history) {
   const agent = agents[agentKey];
+  const tokens = await estimateTokens(agent.system, history);
+  totalTokens += tokens;
+  console.log(`  [${agent.name}: ~${tokens} input tokens]`);
+
+  if (DRY_RUN) {
+    return "[dry-run — skipped]";
+  }
+
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const response = await client.messages.create({
-        model: "claude-sonnet-4-20250514",
+        model: MODEL,
         max_tokens: 400,
         system: agent.system,
         messages: history,
@@ -83,12 +107,21 @@ async function runMeeting(topic) {
 }
 
 async function main() {
-  const topic = process.argv[2] || "What should we build first — supplier onboarding or the owner visualization tool?";
+  const topic = args.filter((a) => a !== "--dry-run")[0] || "What should we build first — supplier onboarding or the owner visualization tool?";
+
+  if (DRY_RUN) {
+    console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
+  }
 
   const pmSummary = await runMeeting(topic);
 
-  console.log("\n--- Meeting complete ---");
-  console.log(`\nMeeting log saved to: ${logFile}\n`);
+  const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  console.log(`\n--- ${DRY_RUN ? "Dry run" : "Meeting"} complete ---`);
+  console.log(`Total input tokens: ~${totalTokens}`);
+  console.log(`Estimated input cost: ~$${cost}`);
+  if (!DRY_RUN) {
+    console.log(`\nMeeting log saved to: ${logFile}\n`);
+  }
 }
 
 main().catch(console.error);

@@ -12,6 +12,18 @@ const HISTORY_FILE = path.join(PM_DIR, "history.json");
 
 const client = new Anthropic();
 
+const MODEL = "claude-sonnet-4-20250514";
+let sessionTokens = 0;
+
+async function estimateTokens(systemPrompt, messages) {
+  const response = await client.messages.countTokens({
+    model: MODEL,
+    system: systemPrompt,
+    messages: messages,
+  });
+  return response.input_tokens;
+}
+
 // ─── Ticket board (persists to disk) ───
 function loadTickets() {
   if (fs.existsSync(TICKETS_FILE)) {
@@ -80,10 +92,14 @@ ${ctx}`;
 
 // ─── LLM call with retry ───
 async function chat(systemPrompt, messages) {
+  const tokens = await estimateTokens(systemPrompt, messages);
+  sessionTokens += tokens;
+  console.log(`  [~${tokens} input tokens | session total: ~${sessionTokens}]`);
+
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const response = await client.messages.create({
-        model: "claude-sonnet-4-20250514",
+        model: MODEL,
         max_tokens: 1500,
         system: systemPrompt,
         messages: messages,
