@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
+import * as readline from "readline";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -9,9 +10,10 @@ const KEY_FILE = path.join(__dirname, "..", "key.txt");
 const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
 const client = new Anthropic({ apiKey });
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "claude-sonnet-4-5";
 const COST_PER_1K_INPUT = 0.003;
 let totalTokens = 0;
+let DRY_RUN = false;
 
 async function estimateTokens(systemPrompt, messages) {
   const response = await client.messages.countTokens({
@@ -295,11 +297,17 @@ async function paceCall() {
 async function chat(systemPrompt, messages, maxTokens = 2000) {
   const tokens = await estimateTokens(systemPrompt, messages);
   totalTokens += tokens;
-  console.log(`  [~${tokens} input tokens]`);
 
   if (DRY_RUN) {
+    const sysP = systemPrompt.slice(0, 150).replace(/\n/g, " ") + (systemPrompt.length > 150 ? "…" : "");
+    const last = messages[messages.length - 1];
+    const msgP = String(last.content).slice(0, 200).replace(/\n/g, " ") + (String(last.content).length > 200 ? "…" : "");
+    console.log(`  ┌ SYSTEM: ${sysP}`);
+    console.log(`  │ ${last.role.toUpperCase()}: ${msgP}`);
+    console.log(`  └ ~${tokens} tokens\n`);
     return "[dry-run — skipped]";
   }
+  console.log(`  [~${tokens} input tokens]`);
 
   for (let attempt = 0; attempt < 7; attempt++) {
     await paceCall();
@@ -625,18 +633,47 @@ function printTokenSummary() {
 
 // ─── CLI ───
 const args = process.argv.slice(2);
-const DRY_RUN = args.includes("--dry-run");
+const DRY_RUN_ONLY = args.includes("--dry-run");
 const filteredArgs = args.filter((a) => a !== "--dry-run");
 const teamArg = filteredArgs[0];
 const taskArg = filteredArgs.slice(1).join(" ");
 
-if (teamArg === "scrum" && taskArg) {
-  if (DRY_RUN) console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
-  runScrum(taskArg).catch(console.error);
-} else if (teamArg && taskArg) {
-  if (DRY_RUN) console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
-  runTeam(teamArg, taskArg).catch(console.error);
-} else {
+function askConfirm(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "y");
+    });
+  });
+}
+
+async function main() {
+  if ((teamArg === "scrum" && taskArg) || (teamArg && taskArg)) {
+    // Phase 1: auto dry-run
+    DRY_RUN = true;
+    console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+    if (teamArg === "scrum") {
+      await runScrum(taskArg);
+    } else {
+      await runTeam(teamArg, taskArg);
+    }
+    if (DRY_RUN_ONLY) process.exit(0);
+
+    // Confirm before real run
+    const go = await askConfirm("\nProceed with real run? [y/N] ");
+    if (!go) { console.log("Aborted."); process.exit(0); }
+
+    // Phase 2: real run
+    DRY_RUN = false;
+    totalTokens = 0;
+    console.log("\n🚀 Running real pipeline...\n");
+    if (teamArg === "scrum") {
+      await runScrum(taskArg);
+    } else {
+      await runTeam(teamArg, taskArg);
+    }
+  } else {
   console.log(`
 Usage:
   node team.js <team> <task>    Run a team pipeline
@@ -668,4 +705,7 @@ Examples:
   node team.js marketing "Design the annotation workspace — brand direction, UI design, UX validation, mobile-first"
   node team.js scrum "Align on the annotation system — does the UI design match what frontend can build?"
 `);
+  }
 }
+
+main().catch(console.error);

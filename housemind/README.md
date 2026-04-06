@@ -1,30 +1,134 @@
-# Copilot Instructions
+# HouseMind — Multi-Agent AI Simulation
 
-This repo runs a multi-agent leadership team. When the user asks to run a meeting or discuss a topic, you run the agents.
+Multi-agent company simulation for HouseMind. Agents run as LLM pipelines using **claude-sonnet-4-5** via Anthropic API. Key file: `../key.txt`.
 
-## How to run a meeting
+---
 
-```bash
-node agents/run.js "your topic here"
+## How every run works (auto dry-run)
+
+**Every script automatically does a dry run first**, then asks you to confirm before spending tokens.
+
+```
+🔍 DRY RUN — estimating prompts and tokens...
+
+  ┌ SYSTEM: You are Head of Marketing...
+  │ USER: Task: Design the annotation workspace...
+  └ ~1050 tokens
+
+... (all agents shown) ...
+
+--- Dry run complete ---
+Total input tokens: ~8200
+Estimated input cost: ~$0.0246
+
+Proceed with real run? [y/N]
 ```
 
-Always run this in the terminal when the user gives a topic or decision to discuss.
+Type `y` + Enter to run for real. Type `n` (or just Enter) to abort.
 
-## After the meeting
+---
 
-The PM will ask the user one question. Wait for the user to answer in chat, then run the next meeting with their answer as context:
+## Scripts
+
+### `node team.js <team> <task>` — Team pipeline
+Runs a full hierarchical team: Head breaks down → sub-agents work → Head consolidates.
 
 ```bash
-node agents/run.js "your topic — founder direction: their answer"
+# Marketing team (6 agents)
+node team.js marketing "Design the annotation workspace for Phase 1 MVP"
+
+# Tech team (6 agents)
+node team.js tech "Build the full annotation system — frontend, API, DB, QA, security"
+
+# Cross-team standup (paired agents)
+node team.js scrum "Does the UI design match what frontend can actually build?"
+
+# Dry-run ONLY (no confirm prompt, just token estimate and exit)
+node team.js marketing --dry-run "Design the annotation workspace"
 ```
 
-## What the files do
+Teams auto-read the other team's latest `team-report.md` as cross-team context.
 
-- `agents/agents.js` — defines Marketing, Ops, Tech, and PM agents. Edit here to change what each agent cares about.
-- `agents/run.js` — the orchestration loop. Edit here to change number of rounds or flow.
+---
 
-## Rules
+### `node run.js ["topic"]` — Executive meeting
+All department heads (Marketing, Ops, Tech) debate a topic for 4 rounds, then PM synthesises.
+
+```bash
+node run.js "Should we merge the Flask prototype into Next.js or rebuild from scratch?"
+
+# Dry-run only
+node run.js --dry-run "topic"
+```
+
+---
+
+### `node department.js <dept> <task>` — Solo department work
+One department head does 3-phase deep work (research → deep work → report).
+
+```bash
+node department.js tech "Solve the god-page architecture for /projects/[id]"
+node department.js marketing "Plan beta launch messaging for architects"
+node department.js operations "Build the product catalog curation plan"
+node department.js pm   # PM reads all dept reports and synthesises
+
+# Dry-run only
+node department.js tech --dry-run "Solve the god-page architecture"
+```
+
+---
+
+### `node chat.js` — Interactive PM chat
+Persistent PM session with ticket board and chat history.
+
+```bash
+node chat.js
+```
+
+---
+
+### `node translate.js [file]` — Thai translation
+Translates any report to Thai (chunked for large files).
+
+```bash
+node translate.js departments/tech/report.md
+node translate.js   # translates all dept reports at once
+```
+
+---
+
+## Saved outputs
+
+```
+departments/
+  tech/
+    report.md           ← latest solo dept report
+    team-report.md      ← latest team pipeline report
+    team-runs/          ← every run timestamped
+  marketing/
+    team-report.md      ← used as cross-team context by tech
+    team-runs/2026-04-06T01-29-54-273Z/
+      0-head-breakdown.md
+      1-brand.md ... 6-community.md
+      final-report.md   ← head consolidation (run to complete)
+  scrum-logs/
+logs/                   ← meeting logs from run.js
+```
+
+---
+
+## Model & cost
+
+- Model: `claude-sonnet-4-5`
+- Input: ~$0.003 / 1K tokens
+- Full team pipeline (~10 calls): ~$0.03–0.08
+- Full meeting (4 rounds): ~$0.01–0.02
+
+---
+
+## Rules for Copilot
 
 - Never edit agent personalities without the user asking
-- Always show the full PM output before asking for user direction
-- If the user says "change marketing to focus on X" — edit `agents/agents.js` directly
+- Always show full PM output before asking for founder direction
+- Always run dry-run first and show token estimate before real run
+- Key file is `../key.txt` relative to housemind/

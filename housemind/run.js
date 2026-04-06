@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
+import * as readline from "readline";
 import { fileURLToPath } from "url";
 import { agents } from "./agents.js";
 
@@ -20,10 +21,12 @@ const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
 const client = new Anthropic({ apiKey });
 
 const args = process.argv.slice(2);
-const DRY_RUN = args.includes("--dry-run");
+const DRY_RUN_ONLY = args.includes("--dry-run");
+const filteredArgs = args.filter((a) => a !== "--dry-run");
+let DRY_RUN = false;
 let totalTokens = 0;
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "claude-sonnet-4-5";
 const COST_PER_1K_INPUT = 0.003; // Sonnet input pricing
 
 async function estimateTokens(systemPrompt, messages) {
@@ -41,11 +44,17 @@ async function chat(agentKey, history) {
   const agent = agents[agentKey];
   const tokens = await estimateTokens(agent.system, history);
   totalTokens += tokens;
-  console.log(`  [${agent.name}: ~${tokens} input tokens]`);
 
   if (DRY_RUN) {
+    const sysP = agent.system.slice(0, 150).replace(/\n/g, " ") + (agent.system.length > 150 ? "…" : "");
+    const last = history[history.length - 1];
+    const msgP = String(last.content).slice(0, 200).replace(/\n/g, " ") + (String(last.content).length > 200 ? "…" : "");
+    console.log(`  ┌ [${agent.name}] SYSTEM: ${sysP}`);
+    console.log(`  │ ${last.role.toUpperCase()}: ${msgP}`);
+    console.log(`  └ ~${tokens} tokens\n`);
     return "[dry-run — skipped]";
   }
+  console.log(`  [${agent.name}: ~${tokens} input tokens]`);
 
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
@@ -108,22 +117,47 @@ async function runMeeting(topic) {
   return pmReply;
 }
 
+function askConfirm(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "y");
+    });
+  });
+}
+
 async function main() {
-  const topic = args.filter((a) => a !== "--dry-run")[0] || "What should we build first — supplier onboarding or the owner visualization tool?";
+  const topic = filteredArgs[0] || "What should we build first — supplier onboarding or the owner visualization tool?";
 
-  if (DRY_RUN) {
-    console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
-  }
+  // Phase 1: auto dry-run
+  DRY_RUN = true;
+  console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+  await runMeeting(topic);
 
-  const pmSummary = await runMeeting(topic);
+  const dryTokens = totalTokens;
+  const dryCost = ((dryTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  console.log(`\n——— Dry run complete ———`);
+  console.log(`Total input tokens: ~${dryTokens}`);
+  console.log(`Estimated input cost: ~$${dryCost}`);
+
+  if (DRY_RUN_ONLY) process.exit(0);
+
+  // Confirm before real run
+  const go = await askConfirm("\nProceed with real run? [y/N] ");
+  if (!go) { console.log("Aborted."); process.exit(0); }
+
+  // Phase 2: real run
+  DRY_RUN = false;
+  totalTokens = 0;
+  console.log("\n🚀 Running real meeting...\n");
+  await runMeeting(topic);
 
   const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  console.log(`\n--- ${DRY_RUN ? "Dry run" : "Meeting"} complete ---`);
+  console.log(`\n——— Meeting complete ———`);
   console.log(`Total input tokens: ~${totalTokens}`);
   console.log(`Estimated input cost: ~$${cost}`);
-  if (!DRY_RUN) {
-    console.log(`\nMeeting log saved to: ${logFile}\n`);
-  }
+  console.log(`\nMeeting log saved to: ${logFile}\n`);
 }
 
 main().catch(console.error);

@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
+import * as readline from "readline";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -9,13 +10,14 @@ const KEY_FILE = path.join(__dirname, "..", "key.txt");
 const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
 const client = new Anthropic({ apiKey });
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "claude-sonnet-4-5";
 const COST_PER_1K_INPUT = 0.003;
 let totalTokens = 0;
+let DRY_RUN = false;
 
 // CLI
 const args = process.argv.slice(2);
-const DRY_RUN = args.includes("--dry-run");
+const DRY_RUN_ONLY = args.includes("--dry-run");
 const filteredArgs = args.filter((a) => a !== "--dry-run");
 const dept = filteredArgs[0];
 const task = filteredArgs.slice(1).join(" ");
@@ -109,11 +111,17 @@ Your job is to:
 async function chat(systemPrompt, messages) {
   const tokens = await estimateTokens(systemPrompt, messages);
   totalTokens += tokens;
-  console.log(`  [~${tokens} input tokens]`);
 
   if (DRY_RUN) {
+    const sysP = systemPrompt.slice(0, 150).replace(/\n/g, " ") + (systemPrompt.length > 150 ? "…" : "");
+    const last = messages[messages.length - 1];
+    const msgP = String(last.content).slice(0, 200).replace(/\n/g, " ") + (String(last.content).length > 200 ? "…" : "");
+    console.log(`  ┌ SYSTEM: ${sysP}`);
+    console.log(`  │ ${last.role.toUpperCase()}: ${msgP}`);
+    console.log(`  └ ~${tokens} tokens\n`);
     return "[dry-run — skipped]";
   }
+  console.log(`  [~${tokens} input tokens]`);
 
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
@@ -236,17 +244,43 @@ function printTokenSummary() {
   console.log(`Estimated input cost: ~$${cost}`);
 }
 
-// CLI
-if (DRY_RUN) {
-  console.log("\n🔍 DRY RUN — estimating tokens without API calls\n");
+function askConfirm(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "y");
+    });
+  });
 }
 
-if (dept === "pm") {
-  runPM().catch(console.error);
-} else if (dept && task) {
-  runDepartment(dept, task).catch(console.error);
-} else {
-  console.log(`
+async function main() {
+  if (dept === "pm" || (dept && task)) {
+    // Phase 1: auto dry-run
+    DRY_RUN = true;
+    console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+    if (dept === "pm") {
+      await runPM();
+    } else {
+      await runDepartment(dept, task);
+    }
+    if (DRY_RUN_ONLY) process.exit(0);
+
+    // Confirm before real run
+    const go = await askConfirm("\nProceed with real run? [y/N] ");
+    if (!go) { console.log("Aborted."); process.exit(0); }
+
+    // Phase 2: real run
+    DRY_RUN = false;
+    totalTokens = 0;
+    console.log("\n🚀 Running real pipeline...\n");
+    if (dept === "pm") {
+      await runPM();
+    } else {
+      await runDepartment(dept, task);
+    }
+  } else {
+    console.log(`
 Usage:
   node department.js <dept> <task>    Run a department with a task
   node department.js pm               PM synthesizes all department reports
@@ -260,4 +294,7 @@ Examples:
   node department.js operations "Build the product catalog curation plan for 100-150 items"
   node department.js pm
 `);
+  }
 }
+
+main().catch(console.error);
