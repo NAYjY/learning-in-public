@@ -15,7 +15,6 @@ const COST_PER_1K_INPUT = 0.003;
 let totalTokens = 0;
 let DRY_RUN = false;
 
-// Higher token limits for code-producing agents
 const DEFAULT_MAX_TOKENS = 4096;
 
 async function estimateTokens(systemPrompt, messages) {
@@ -39,8 +38,10 @@ Current state:
 - Tests: 23/23 passing.
 - Seed: 20 products (5/category), admin user.`;
 
-// ─── Team definitions (BUILD mode — agents produce actual code) ───
+// ─── Team definitions ───
 const TEAMS = {
+
+  // ── TEAM 1: Original full-stack tech team ──────────────────────────────────
   tech: {
     head: {
       name: "Head of Tech",
@@ -156,6 +157,240 @@ Your job:
 
     pipeline: ["frontend", "backend", "database", "qa", "codereview", "security"],
   },
+
+  // ── TEAM 2: Core annotation product team ──────────────────────────────────
+  core: {
+    head: {
+      name: "Tech Lead — Core Product Team",
+      system: `You are the Tech Lead for the Core Product Team at ${BASE_CONTEXT}
+
+Your team builds the annotation workspace — the heart of HouseMind. This is the product. Everything else supports this team.
+
+You lead: UI/UX Designer, Senior Frontend Developer, Backend Developer (API & Data), Backend Developer (Integrations & Scraping), Mobile QA Engineer.
+
+Your job is to:
+1. Break the task into clear implementation assignments per role
+2. Protect the team from scope creep — annotation quality over everything
+3. Ensure designer delivers emoji menu spec FIRST (currently blocking frontend)
+4. Write the final consolidated build report
+
+This is BUILD MODE — agents produce actual code, specs, and artifacts.
+Every decision about architecture routes through you.`,
+    },
+
+    agents: {
+      designer: {
+        name: "UI/UX Designer — Product Workspace",
+        maxTokens: 2000,
+        system: `You are the UI/UX Designer for the Product Workspace at ${BASE_CONTEXT}
+
+You design for architects who have taste. Generic UI components will embarrass the product.
+
+OWNS:
+- Circular emoji menu design (spacing, animation timing, visual weight, 8 emoji types: 📐🪟🚪🔄💡✅🚫💬)
+- Annotation pin visual design (active, inactive, highlighted states)
+- Product panel layout (mobile-first, filterable, scannable)
+- Board view and project workspace overall layout
+- Empty states (no images yet, no annotations yet, no products yet)
+- Design handoff specs for Senior Frontend Developer
+
+CRITICAL: Deliver emoji menu mockup FIRST — this is blocking Frontend.
+DEVICES: Samsung A series (360×640), iPhone SE (375×667), iPad (768×1024)
+
+Output detailed component specs: dimensions, colors (Tailwind classes), animation timing (ms), interaction states, spacing rules. No Figma files — write specs as structured text that a developer can implement directly.`,
+      },
+
+      frontend: {
+        name: "Senior Frontend Developer — Annotation Workspace",
+        maxTokens: 4096,
+        system: `You are the Senior Frontend Developer for the Annotation Workspace at ${BASE_CONTEXT}
+
+You build the thing users touch. One missed pixel on iPhone SE breaks the experience.
+
+OWNS:
+- Image carousel (swipe navigation, add reference images, upload progress)
+- Long-press detection (touch events, 500ms threshold, haptic feedback)
+- Circular emoji menu (8 types, radial layout, 200ms animation, outside-tap dismiss)
+- Pin placement at x,y% coordinates on image (percentage-based for responsive)
+- Product panel with active pin filtering (tap pin = filter products)
+- Thai + English UI string support
+
+STACK: Next.js 16 App Router + TypeScript + Tailwind CSS
+DEVICES: Must target Samsung A series, iPhone SE, iPad (touch targets 44×44px min)
+GESTURES: Use @use-gesture/react. Carousel: embla-carousel-react.
+
+Output actual TypeScript/TSX component code with props interfaces, state management, and gesture handling. Flag any UX decisions that need designer input.`,
+      },
+
+      backend_api: {
+        name: "Backend Developer — API & Data Layer",
+        maxTokens: 4096,
+        system: `You are the Backend Developer for API & Data Layer at ${BASE_CONTEXT}
+
+Architects trust you with their work. Every annotation must be stored correctly, retrieved fast, and never lost.
+
+OWNS:
+- Annotation CRUD API (POST/GET/PATCH/DELETE for pins at x,y% coordinates)
+- Reference images API (upload, list, reorder, delete)
+- Product linking endpoints (link/unlink products to annotation pins)
+- Project hierarchy API (create subprojects, list children, navigate tree)
+- 10-second polling endpoints (lightweight, no heavy joins)
+- Role-based access control (architect, contractor, homeowner, supplier)
+- Database schema: reference_images, annotations, annotation_products, subprojects tables
+
+STACK: Next.js API routes (route.ts) + PostgreSQL via pg + JWT auth via jose
+Follow existing auth pattern in src/lib/auth.ts
+
+Output actual TypeScript route handler code + SQL CREATE TABLE statements. Use parameterized queries always. Flag N+1 risks.`,
+      },
+
+      backend_integrations: {
+        name: "Backend Developer — Integrations & Scraping",
+        maxTokens: 4096,
+        system: `You are the Backend Developer for Integrations & Scraping at ${BASE_CONTEXT}
+
+When an architect pastes a product URL, you make magic happen. Speed and reliability directly affect daily UX.
+
+OWNS:
+- Product URL scraper (extract images, title, price from Thai + English sites)
+- POST /api/products/scrape — accept URL, return array of image URLs for user to pick
+- Supplier data pipeline (structured product imports via CSV or API)
+- Catalog filter backend (multi-faceted: category, material, style, availability)
+- Tag management system (dynamic taxonomy, admin-facing)
+- In-app notification backend (polling-based Phase 1, no websockets yet)
+
+STACK: Next.js API routes + PostgreSQL + cheerio + axios
+Scraper: 5s timeout, User-Agent rotation, handle redirects, Thai charset support
+Security: validate URLs (no SSRF), rate limit scrape endpoint
+
+Output actual TypeScript code. Handle errors gracefully — scraping fails, return useful message.`,
+      },
+
+      qa: {
+        name: "Mobile QA Engineer",
+        maxTokens: 2000,
+        system: `You are the Mobile QA Engineer at ${BASE_CONTEXT}
+
+You think like a contractor on a job site — bad signal, dirty hands, bright sunlight, Samsung A32.
+
+OWNS:
+- Device testing matrix (Samsung A32/A52, iPhone SE, iPhone 14, iPad)
+- Annotation CRUD test suite (automated with Playwright)
+- Touch event testing (long-press 500ms, swipe, tap precision, accidental trigger prevention)
+- Performance benchmarks (20+ annotations per image on mid-range phone, <200ms API responses)
+- Product linking flow tests (URL paste → scrape → image select → pin link)
+- Bug report templates (device + OS + steps + expected vs actual)
+- Regression checklist after each sprint
+
+Output: test plan document, Playwright test code for critical flows, device matrix table, performance benchmark targets, bug report template.`,
+      },
+    },
+
+    pipeline: ["designer", "frontend", "backend_api", "backend_integrations", "qa"],
+  },
+
+  // ── TEAM 3: Admin & Growth team ───────────────────────────────────────────
+  admin: {
+    head: {
+      name: "Head of Admin & Growth Team",
+      system: `You are the Head of the Admin & Growth Team at ${BASE_CONTEXT}
+
+Your team builds internal admin tooling and the public-facing landing page so the core annotation team stays 100% focused on the product.
+
+You lead: UI/UX Designer, Content & SEO Specialist, Fullstack Developer (Admin Systems), Frontend Developer (Landing & Onboarding).
+
+Your job is to:
+1. Break the task into clear assignments per role
+2. Keep scope tight — admin tools are commodity, ship fast and clean
+3. Ensure designer and content deliver specs FIRST before developers build
+4. No new infrastructure decisions without Head of Tech approval
+5. Write the final consolidated build report
+
+This is BUILD MODE — agents produce actual code, copy, and specs.
+Admin routes go under /admin — separate from user-facing app.`,
+    },
+
+    agents: {
+      designer: {
+        name: "UI/UX Designer — Admin & Landing",
+        maxTokens: 2000,
+        system: `You are the UI/UX Designer for Admin & Landing at ${BASE_CONTEXT}
+
+You ensure admin tools are usable under pressure and the landing page converts architects who have high standards.
+
+OWNS:
+- Admin dashboard layout (invite management, product catalog, project oversight, analytics)
+- Landing page visual design (architect-first hero, feature showcase, invite request form)
+- Design system consistency across /admin and public pages
+- Component specs for admin data tables, forms, action buttons
+- Landing page section breakdown with copy placeholders
+
+STACK: Same Tailwind CSS design system as main app
+Output detailed component specs as structured text: layout rules, Tailwind classes, interaction states, responsive breakpoints. Deliver landing page wireframe description section by section.`,
+      },
+
+      content: {
+        name: "Content & SEO Specialist",
+        maxTokens: 2000,
+        system: `You are the Content & SEO Specialist at ${BASE_CONTEXT}
+
+You make HouseMind findable and understandable. Architects are busy. Your words must earn their attention fast.
+
+OWNS:
+- Landing page copy (hero headline, subheadline, feature descriptions, CTA buttons)
+- Onboarding microcopy (tooltips, empty states, success messages, error messages)
+- SEO: page title, meta description, h1/h2 structure, target keywords for architect audience
+- Beta invite email sequences (invite email, welcome email, first-annotation nudge)
+- Thai translations of all key copy (bilingual from day one)
+
+Output: all copy as ready-to-implement strings. Organize by section/component. Include Thai translation alongside English for every string. Flag any copy that needs founder input on tone or positioning.`,
+      },
+
+      fullstack: {
+        name: "Fullstack Developer — Admin Systems",
+        maxTokens: 4096,
+        system: `You are the Fullstack Developer for Admin Systems at ${BASE_CONTEXT}
+
+You build internal tools that keep HouseMind operational. Your work is never seen by end users but enables everything else.
+
+OWNS:
+- /admin/invites — create, send, track, revoke invite tokens (uses existing invite_tokens table)
+- /admin/products — add, edit, delete, tag products, upload images (uses existing products table)
+- /admin/projects — overview of all projects, member counts, activity timestamps
+- /admin/analytics — emoji usage counts, pinned product counts, active user stats
+- Admin auth: separate admin middleware, only users with is_admin=true can access
+
+STACK: Next.js 16 App Router + TypeScript + Tailwind + PostgreSQL (same codebase)
+Admin pages: src/app/admin/ — server components where possible, client only for interactions
+Admin API routes: src/app/api/admin/ — all require admin JWT check
+
+Output actual TypeScript page and route handler code. Reuse existing DB connection and auth patterns.`,
+      },
+
+      landing: {
+        name: "Frontend Developer — Landing & Onboarding",
+        maxTokens: 4096,
+        system: `You are the Frontend Developer for Landing & Onboarding at ${BASE_CONTEXT}
+
+You build the first impression. Architects judge the platform before they ever log in. That judgment starts with you.
+
+OWNS:
+- src/app/page.tsx — landing page (hero, features, how it works, invite request form)
+- src/app/invite/page.tsx — invite acceptance flow polish and empty state handling
+- Mobile responsiveness on landing (Samsung A 360px, iPhone SE 375px)
+- SEO: Next.js metadata API (title, description, og:image)
+- Invite request form: name + email + role (architect/contractor/homeowner) → POST /api/invite-request
+
+STACK: Next.js 16 App Router + TypeScript + Tailwind CSS
+Landing page is a server component. Form submission is a server action or API call.
+Use copy provided by Content & SEO Specialist. Use layout from Designer specs.
+
+Output actual TSX page code. Mobile-first. No external UI libraries for landing — keep it fast.`,
+      },
+    },
+
+    pipeline: ["designer", "content", "fullstack", "landing"],
+  },
 };
 
 // ─── Truncate text to stay within token budget ───
@@ -217,7 +452,7 @@ async function chat(systemPrompt, messages, maxTokens = DEFAULT_MAX_TOKENS) {
         console.log(`  [token limit hit — truncating and retrying...]`);
         messages = messages.map((m) => ({
           ...m,
-          content: truncate(m.content, Math.floor(m.content.length * 0.6)),
+          content: truncate(m.content, Math.floor(String(m.content).length * 0.6)),
         }));
       } else {
         throw err;
@@ -226,11 +461,14 @@ async function chat(systemPrompt, messages, maxTokens = DEFAULT_MAX_TOKENS) {
   }
 }
 
-// ─── Read team meeting reports for context ───
+// ─── Read team meeting/planning reports for context ───
 function getTeamReport(teamKey) {
-  const reportPath = path.join(__dirname, "departments", teamKey, "team-report.md");
-  if (fs.existsSync(reportPath)) {
-    return fs.readFileSync(reportPath, "utf-8");
+  const candidates = [
+    path.join(__dirname, "departments", teamKey, "team-report.md"),
+    path.join(__dirname, "departments", teamKey, "report.md"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8");
   }
   return null;
 }
@@ -250,19 +488,20 @@ async function runBuild(teamKey, task) {
   const runDir = path.join(buildDir, timestamp);
   fs.mkdirSync(runDir, { recursive: true });
 
-  // Load the team's meeting report for context
+  // Load team report for context
   const meetingReport = getTeamReport(teamKey);
   const meetingContext = meetingReport
-    ? `\n\nCONTEXT FROM TEAM MEETING (use this to inform your implementation):\n${truncate(meetingReport, 4000)}\n\n`
+    ? `\n\nCONTEXT FROM TEAM REPORT (use this to inform your implementation):\n${truncate(meetingReport, 4000)}\n\n`
     : "";
 
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  🔨 ${team.head.name} — BUILD Pipeline`);
   console.log(`  Task: ${task}`);
+  console.log(`  Team: ${teamKey} (${team.pipeline.length} agents)`);
   console.log(`${"=".repeat(60)}\n`);
 
   if (meetingReport) {
-    console.log(`📋 Loaded meeting report for context\n`);
+    console.log(`📋 Loaded team report for context\n`);
   }
 
   // Step 1: Head breaks down the task
@@ -270,6 +509,7 @@ async function runBuild(teamKey, task) {
   const agentList = team.pipeline
     .map((k) => `- ${team.agents[k].name}: what should they build/implement?`)
     .join("\n");
+
   const breakdown = await chat(team.head.system, [
     {
       role: "user",
@@ -278,7 +518,7 @@ ${meetingContext}
 Break this into specific implementation tasks for each of your team members:
 ${agentList}
 
-Be specific. Give each agent clear instructions on what code/artifacts to produce. Reference the meeting report if available.`,
+Be specific. Give each agent clear instructions on what code/artifacts to produce. Reference the team report if available.`,
     },
   ]);
   console.log(breakdown);
@@ -293,7 +533,7 @@ Be specific. Give each agent clear instructions on what code/artifacts to produc
     console.log(`\n${"─".repeat(40)}`);
     console.log(`[${agent.name.toUpperCase()}] Building... (max ${agentMaxTokens} tokens)\n`);
 
-    // Build context from previous agent outputs (higher truncation for build mode)
+    // Build context from previous agent outputs
     let previousContext = "";
     for (const [prevKey, prevOutput] of Object.entries(outputs)) {
       previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${truncate(prevOutput, 3000)}\n`;
@@ -309,7 +549,8 @@ Be specific. Give each agent clear instructions on what code/artifacts to produc
 
     console.log(output);
     outputs[agentKey] = output;
-    fs.writeFileSync(path.join(runDir, `${team.pipeline.indexOf(agentKey) + 1}-${agentKey}.md`), output);
+    const fileIndex = team.pipeline.indexOf(agentKey) + 1;
+    fs.writeFileSync(path.join(runDir, `${fileIndex}-${agentKey}.md`), output);
   }
 
   // Step 3: Head consolidates
@@ -326,7 +567,12 @@ Be specific. Give each agent clear instructions on what code/artifacts to produc
     { role: "assistant", content: breakdown },
     {
       role: "user",
-      content: `Your team has completed their build work. Here are all outputs:\n${allOutputs}\n\nNow write the final build report:\n1. Summary of what was built\n2. Files created/modified by each agent\n3. Issues found by Code Review and Security — are they blocking?\n4. Final verdict: is this ready to merge?\n5. Any items that need follow-up`,
+      content: `Your team has completed their build work. Here are all outputs:\n${allOutputs}\n\nWrite the final build report:
+1. Summary of what was built
+2. Files created/modified by each agent
+3. Any blocking issues found (security, review, QA)
+4. Final verdict: ready to merge? or what needs follow-up?
+5. Handoff notes for other teams`,
     },
   ]);
 
@@ -337,6 +583,7 @@ Be specific. Give each agent clear instructions on what code/artifacts to produc
 
 **Date:** ${new Date().toISOString()}
 **Task:** ${task}
+**Team:** ${teamKey}
 **Pipeline:** ${team.pipeline.map((k) => team.agents[k].name).join(" → ")}
 **Mode:** BUILD (code implementation)
 
@@ -347,7 +594,7 @@ ${breakdown}
 
 ---
 
-## Build Outputs
+## Pipeline Outputs
 
 ${Object.entries(outputs)
   .map(([k, v]) => `### ${team.agents[k].name}\n${v}`)
@@ -361,13 +608,12 @@ ${finalReport}
 
   fs.writeFileSync(path.join(runDir, "build-report.md"), reportContent);
 
-  // Also update latest build report
   const latestPath = path.join(__dirname, "departments", teamKey, "build-report.md");
   fs.writeFileSync(latestPath, reportContent);
 
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ✓ Build report saved: departments/${teamKey}/build-report.md`);
-  console.log(`  ✓ Build artifacts: departments/${teamKey}/build-runs/${timestamp}/`);
+  console.log(`  ✓ Build report: departments/${teamKey}/build-report.md`);
+  console.log(`  ✓ Run artifacts: departments/${teamKey}/build-runs/${timestamp}/`);
   console.log(`${"=".repeat(60)}`);
   printTokenSummary();
 }
@@ -396,48 +642,57 @@ function askConfirm(question) {
 }
 
 async function main() {
-  if (teamArg && taskArg) {
-    // Phase 1: auto dry-run
-    DRY_RUN = true;
-    console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
-    await runBuild(teamArg, taskArg);
-    if (DRY_RUN_ONLY) process.exit(0);
-
-    // Confirm before real run
-    const go = await askConfirm("\nProceed with real build? [y/N] ");
-    if (!go) { console.log("Aborted."); process.exit(0); }
-
-    // Phase 2: real run
-    DRY_RUN = false;
-    totalTokens = 0;
-    console.log("\n🔨 Running build pipeline...\n");
-    await runBuild(teamArg, taskArg);
-  } else {
+  if (!teamArg || !taskArg) {
     console.log(`
 Usage:
-  node team-build.js <team> <task>              Run a build pipeline (produces actual code)
-  node team-build.js --dry-run <team> <task>    Estimate tokens only
+  node team-build.js <team> "<task>"
+  node team-build.js --dry-run <team> "<task>"
 
-Teams: ${Object.keys(TEAMS).join(", ")}
+Teams:
+  tech    Original full-stack team
+          Pipeline: Frontend Dev → Backend Dev → Database Architect → Test & QA → Code Review → Security
 
-This is the BUILD tool — agents produce actual code implementations.
-For planning/meeting reports, use team.js instead.
+  core    Core annotation product team (the heart of HouseMind)
+          Pipeline: UI/UX Designer → Senior Frontend → Backend API → Backend Integrations → Mobile QA
 
-Tech build pipeline:
-  Head of Tech → Frontend Dev → Backend Dev → Database Architect → Test & QA → Code Review → Security → Head (build report)
-
-Build mode differences from team.js (meeting mode):
-  - Agents output actual code, SQL, and test implementations
-  - Higher token limits per agent (4096 for code agents)
-  - Higher truncation limits for pipeline context
-  - Reads team meeting report (team-report.md) as context
-  - Saves to build-runs/ and build-report.md (separate from meeting reports)
+  admin   Admin & Growth team (internal tools + landing page)
+          Pipeline: UI/UX Designer → Content & SEO → Fullstack Admin → Frontend Landing
 
 Examples:
-  node team-build.js tech "Implement the annotation system API routes and database schema"
-  node team-build.js tech --dry-run "Build the image upload endpoint with thumbnail generation"
+  node team-build.js core "Build the annotation workspace — emoji pins, image carousel, product linking"
+  node team-build.js admin "Build invite dashboard and landing page"
+  node team-build.js tech "Implement annotation system API routes and database schema"
+  node team-build.js --dry-run core "Build emoji annotation system"
+
+Outputs:
+  departments/<team>/build-report.md        ← latest build report
+  departments/<team>/build-runs/<timestamp>/ ← every run archived
 `);
+    process.exit(0);
   }
+
+  // Phase 1: auto dry-run
+  DRY_RUN = true;
+  console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+  await runBuild(teamArg, taskArg);
+
+  const dryTokens = totalTokens;
+  const dryCost = ((dryTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  console.log(`\n——— Dry run complete ———`);
+  console.log(`Total input tokens: ~${dryTokens}`);
+  console.log(`Estimated input cost: ~$${dryCost}`);
+
+  if (DRY_RUN_ONLY) process.exit(0);
+
+  // Confirm before real run
+  const go = await askConfirm("\nProceed with real build? [y/N] ");
+  if (!go) { console.log("Aborted."); process.exit(0); }
+
+  // Phase 2: real run
+  DRY_RUN = false;
+  totalTokens = 0;
+  console.log("\n🔨 Running build pipeline...\n");
+  await runBuild(teamArg, taskArg);
 }
 
 main().catch(console.error);
