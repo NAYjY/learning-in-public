@@ -132,3 +132,13 @@ logs/                   ← meeting logs from run.js
 - Always show full PM output before asking for founder direction
 - Always run dry-run first and show token estimate before real run
 - Key file is `../key.txt` relative to housemind/
+
+## What each script produces
+
+| Script | Output | Use it to |
+|---|---|---|
+| `chat.js` | `pm/chat-log.md` | Catch up on what you told PM, daily check-ins |
+| `department.js pm` | `pm/report.md` | Get PM synthesis of all dept reports |
+| `department.js <dept>` | `departments/<dept>/report.md` | See solo dept head deep work |
+| `run.js` | `logs/meeting-*.md` | Review what was decided in executive meetings |
+| `team.js <dept>` | `departments/<dept>/team-report.md` | See full team's work output |
