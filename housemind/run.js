@@ -5,6 +5,43 @@ import * as readline from "readline";
 import { fileURLToPath } from "url";
 import { agents } from "./agents.js";
 
+// ─── Load all project context ───
+function loadContext() {
+  const parts = [];
+  const deptDir = path.join(__dirname, "departments");
+  for (const dept of ["tech", "marketing", "operations", "pm"]) {
+    const reportPath = path.join(deptDir, dept, "report.md");
+    if (fs.existsSync(reportPath)) {
+      const content = fs.readFileSync(reportPath, "utf-8");
+      // Truncate each report to stay under token limits
+      parts.push(`## ${dept.toUpperCase()} REPORT:\n${content.slice(0, 2000)}`);
+    }
+    const teamReportPath = path.join(deptDir, dept, "team-report.md");
+    if (fs.existsSync(teamReportPath)) {
+      const content = fs.readFileSync(teamReportPath, "utf-8");
+      parts.push(`## ${dept.toUpperCase()} TEAM REPORT:\n${content.slice(0, 1500)}`);
+    }
+  }
+
+  // Add last meeting log if available
+  const logsDir = path.join(__dirname, "logs");
+  let lastMeeting = null;
+  if (fs.existsSync(logsDir)) {
+    const files = fs.readdirSync(logsDir)
+      .filter(f => f.startsWith("meeting-") && f.endsWith(".md"))
+      .sort();
+    if (files.length > 0) {
+      const lastLog = files[files.length - 1];
+      const logPath = path.join(logsDir, lastLog);
+      const logContent = fs.readFileSync(logPath, "utf-8");
+      // Only include the last ~3000 chars to avoid token overflow
+      parts.push(`## LAST MEETING LOG (${lastLog}):\n${logContent.slice(-3000)}`);
+    }
+  }
+
+  return parts.join("\n\n---\n\n");
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logsDir = path.join(__dirname, "logs");
 fs.mkdirSync(logsDir, { recursive: true });
@@ -85,6 +122,9 @@ function formatMessage(speaker, text) {
 
 async function runMeeting(topic) {
   const history = [];
+  // Load project context and prepend as system message
+  const context = loadContext();
+  
   let round = 0;
 
   console.log("\n--- Meeting started ---");
@@ -93,8 +133,10 @@ async function runMeeting(topic) {
   log(`**Date:** ${new Date().toISOString()}\n`);
   log(`**Topic:** ${topic}\n`);
   log(`---\n`);
-
-  const opening = `We need to discuss: ${topic}. Marketing, what's your take?`;
+  const opening = context
+    ? `## BRIEFING — READ BEFORE SPEAKING:\n${context}\n\n---\n\nWe need to discuss: ${topic}. Marketing, what's your take?`
+    : `We need to discuss: ${topic}. Marketing, what's your take?`;
+  // const opening = `We need to discuss: ${topic}. Marketing, what's your take?`;
   history.push({ role: "user", content: opening });
 
   while (round < MAX_ROUNDS) {
