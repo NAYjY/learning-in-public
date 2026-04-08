@@ -11,6 +11,7 @@ const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
 const client = new Anthropic({ apiKey });
 
 const MODEL = "claude-sonnet-4-5";
+// const MODEL = "claude-opus-4-5";
 const COST_PER_1K_INPUT = 0.003;
 let totalTokens = 0;
 let DRY_RUN = false;
@@ -120,7 +121,8 @@ You are doing independent work for your department. When given a task:
 2. Write concrete, actionable recommendations with specific channels, copy, and metrics
 3. Include a clear plan with deliverables
 4. Flag risks and dependencies on other departments
-5. Be direct — kill ideas that don't drive growth`,
+5. Be direct — kill ideas that don't drive growth
+6. Do NOT output full code implementations`,
   },
 
   operations: {
@@ -340,7 +342,7 @@ function askConfirm(question) {
 
 async function main() {
   if (dept === "pm" || (dept && task)) {
-    // Phase 1: auto dry-run
+    /* // Phase 1: auto dry-run
     DRY_RUN = true;
     console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
     if (dept === "pm") {
@@ -352,7 +354,7 @@ async function main() {
 
     // Confirm before real run
     const go = await askConfirm("\nProceed with real run? [y/N] ");
-    if (!go) { console.log("Aborted."); process.exit(0); }
+    if (!go) { console.log("Aborted."); process.exit(0); } */
 
     // Phase 2: real run
     DRY_RUN = false;
