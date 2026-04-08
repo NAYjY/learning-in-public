@@ -64,6 +64,7 @@ let DRY_RUN = false;
 let totalTokens = 0;
 
 const MODEL = "claude-sonnet-4-5";
+// const MODEL = "claude-opus-4-5";
 const COST_PER_1K_INPUT = 0.003; // Sonnet input pricing
 
 async function estimateTokens(systemPrompt, messages) {
@@ -172,18 +173,18 @@ function askConfirm(question) {
 async function main() {
   const topic = filteredArgs[0] || "What should we build first — supplier onboarding or the owner visualization tool?";
 
-  // Phase 1: auto dry-run
-  DRY_RUN = true;
-  console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
-  await runMeeting(topic);
+  // // Phase 1: auto dry-run
+  // DRY_RUN = true;
+  // console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+  // await runMeeting(topic);
 
-  const dryTokens = totalTokens;
-  const dryCost = ((dryTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  console.log(`\n——— Dry run complete ———`);
-  console.log(`Total input tokens: ~${dryTokens}`);
-  console.log(`Estimated input cost: ~$${dryCost}`);
+  // const dryTokens = totalTokens;
+  // const dryCost = ((dryTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  // console.log(`\n——— Dry run complete ———`);
+  // console.log(`Total input tokens: ~${dryTokens}`);
+  // console.log(`Estimated input cost: ~$${dryCost}`);
 
-  if (DRY_RUN_ONLY) process.exit(0);
+  // if (DRY_RUN_ONLY) process.exit(0);
 
   // Confirm before real run
   const go = await askConfirm("\nProceed with real run? [y/N] ");

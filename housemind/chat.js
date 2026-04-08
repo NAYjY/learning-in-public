@@ -79,7 +79,7 @@ function loadContext() {
     if (fs.existsSync(reportPath)) {
       const content = fs.readFileSync(reportPath, "utf-8");
       // Truncate each report to stay under token limits
-      parts.push(`## ${dept.toUpperCase()} REPORT:\n${content.slice(0, 2000)}`);
+      parts.push(`## ${dept.toUpperCase()} REPORT:\n${content.slice(0, 20000)}`);
     }
     const teamReportPath = path.join(deptDir, dept, "team-report.md");
     if (fs.existsSync(teamReportPath)) {
@@ -140,11 +140,16 @@ async function chat(systemPrompt, messages) {
     try {
       const response = await client.messages.create({
         model: MODEL,
-        max_tokens: 15000,
+        max_tokens: 1500,
         system: systemPrompt,
         messages: messages,
+        stream: false,
       });
-      return response.content[0].text;
+      if (response && response.content && Array.isArray(response.content) && response.content.length > 0 && response.content[0].text) {
+        return response.content[0].text;
+      } else {
+        throw new Error("Anthropic API response missing content or text field.");
+      }
     } catch (err) {
       if ((err.status === 429 || err.status === 413) && attempt < 4) {
         const wait = (attempt + 1) * 15;
