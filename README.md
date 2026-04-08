@@ -41,17 +41,19 @@ make it team-meeting and scrum meeting cross-team context\
 want to move from chat bot so let them create path that i could talk to manager in terminal, which still didnt get the picture that it's not same as run each node .js file
 
 ## Phase2
-Face token limit so frist just take delay but not fix
-Turn to API, now in care about token so i set dry-run to see how many token take each promt
-turn out it not directly accualte just a glimps of it
-logs is a mess, now i focus on what each node .js work
-got wried log after check  i seperate real operation and meeting agent so meeting not get too detail but focus on plan
-make every meeting load last every meeting of each department and the previous big meeting, just found out that before this action is not on every .js
-so now prompt would not be so pain in the ass
->see that how token take and think the logs is too bloated as it would be the next input too
->make logs compact but still in charecter, set up meeting rules
->seperate the role and descprition to .md and action to .js and lean it
->turn from python instaed of .js for god sake
->make them do meeting when nned by themsleves like after nig meeting then go to each team meeting then , big again // scrum until they want the owner input 
+Face token limit so frist just take delay but not fix\
+Turn to API, now in care about token so i set dry-run to see how many token take each promt\
+turn out it not directly accualte just a glimps of it\
+logs is a mess, now i focus on what each node .js work\
+got wried log after check  i seperate real operation and meeting agent so meeting not get too detail but focus on plan\
+make every meeting load last every meeting of each department and the previous big meeting, just found out that before this action is not on every .js\
+so now prompt would not be so pain in the ass\
+>>ongoing\
+>grant access to build.js file-writing ability can they do the git , new bracnh  each time we  order promt ,commit in each step
+>see that how token take and think the logs is too bloated as it would be the next input too\
+>make logs compact but still in charecter, set up meeting rules\
+>seperate the role and descprition to .md and action to .js and lean it\
+>turn from python instaed of .js for god sake\
+>make them do meeting when nned by themsleves like after nig meeting then go to each team meeting then , big again // scrum until they want the owner input\
 
 
