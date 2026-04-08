@@ -29,12 +29,42 @@ const BASE_CONTEXT = `HouseMind — a platform connecting architects, contractor
 
 Current state:
 - Architect-first, invite-only beta. Co-owner personally invites architects.
-- MVP built: Next.js 16 + TS + Tailwind + PostgreSQL + JWT auth (jose).
-- Pages: landing, login, invite, catalog (4 categories, ref/available, Request Availability), projects (boards + role-colored comments), feedback widget.
-- API: auth (invite/accept-invite/login), products, projects, comments, feedback.
-- Database: 7 tables (users, invite_tokens, products, projects, project_members, project_products, comments, feedback).
-- Tests: 23/23 passing.
-- Seed: 20 products (5/category), admin user.`;
+- Stack: Next.js frontend (Vercel) + FastAPI backend (Railway) + PostgreSQL + S3
+- Auth: JWT invite-token system (magic links)
+- Mobile-first: Samsung A series, iPhone SE, iPad baseline
+- Thai + English support
+
+Architecture:
+- Next.js handles all UI, routing, and frontend logic
+- FastAPI handles all API endpoints, business logic, and DB access
+- PostgreSQL is the single source of truth
+- Frontend calls FastAPI via REST API
+
+MVP Scope (Phase 1):
+- Image carousel with reference images
+- Emoji annotation system (long-press → 8 emoji types → pin at x,y%)
+- Product linking (tap pin → paste URL → scrape images → pick one)
+- Product panel filtered by active pins
+- Hierarchical projects (main → subprojects)
+- Role-based access: Architect, Contractor, Homeowner, Supplier
+- Role-colored comments
+- Curated reference catalog (~100-150 products in tiles, fixtures, lighting, cladding)
+- "Reference" vs "available" labeling
+- "Request availability" button for demand-driven supplier recruitment
+- Inline feedback widget
+
+Database: 7 tables (users, invite_tokens, products, projects, project_members, project_products, comments, feedback)
+
+Phase 1 Skip:
+- Pricing feeds
+- Revit integration
+- Supplier self-serve dashboard
+- Automated scraping pipelines
+
+Success criteria:
+- 5+ architects create real boards
+- 3+ boards shared with homeowner/contractor
+- Feedback collected via 15-min calls after first week`;
 
 // ─── Team definitions ───
 // Each team has a head + sub-agents. The head orchestrates the pipeline.
