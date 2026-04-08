@@ -49,11 +49,10 @@ got wried log after check  i seperate real operation and meeting agent so meetin
 make every meeting load last every meeting of each department and the previous big meeting, just found out that before this action is not on every .js\
 so now prompt would not be so pain in the ass\
 >>ongoing\
->grant access to build.js file-writing ability can they do the git , new bracnh  each time we  order promt ,commit in each step
 >see that how token take and think the logs is too bloated as it would be the next input too\
 >make logs compact but still in charecter, set up meeting rules\
 >seperate the role and descprition to .md and action to .js and lean it\
 >turn from python instaed of .js for god sake\
 >make them do meeting when nned by themsleves like after nig meeting then go to each team meeting then , big again // scrum until they want the owner input\
-
-
+>grant access to build.js file-writing ability can they do the git , new bracnh  each time we  order promt ,commit in each step
+>build.js still a mess due roles and BASE_CONTEXT is not from last meeting
