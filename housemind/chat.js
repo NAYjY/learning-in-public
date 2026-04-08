@@ -15,6 +15,7 @@ const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
 const client = new Anthropic({ apiKey });
 
 const MODEL = "claude-sonnet-4-6";
+// const MODEL = "claude-opus-4-5";
 let sessionTokens = 0;
 
 async function estimateTokens(systemPrompt, messages) {
@@ -139,7 +140,7 @@ async function chat(systemPrompt, messages) {
     try {
       const response = await client.messages.create({
         model: MODEL,
-        max_tokens: 1500,
+        max_tokens: 15000,
         system: systemPrompt,
         messages: messages,
       });

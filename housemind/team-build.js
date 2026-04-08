@@ -62,7 +62,7 @@ Keep the pipeline moving — don't over-iterate.`,
     agents: {
       frontend: {
         name: "Frontend Dev",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Frontend Developer on the Tech team at ${BASE_CONTEXT}
 
 Your job:
@@ -78,7 +78,7 @@ Your job:
 
       backend: {
         name: "Backend Dev",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Backend Developer on the Tech team at ${BASE_CONTEXT}
 
 Your job:
@@ -94,7 +94,7 @@ Your job:
 
       database: {
         name: "Database Architect",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Database Architect on the Tech team at ${BASE_CONTEXT}
 
 Your job:
@@ -110,7 +110,7 @@ Your job:
 
       qa: {
         name: "Test & QA",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Test & QA Lead on the Tech team at ${BASE_CONTEXT}
 
 Your job:
@@ -125,7 +125,7 @@ Your job:
 
       codereview: {
         name: "Code Review",
-        maxTokens: 2000,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Code Review Lead on the Tech team at ${BASE_CONTEXT}
 
 Your job:
@@ -140,7 +140,7 @@ Your job:
 
       security: {
         name: "Security",
-        maxTokens: 2000,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Security Lead on the Tech team at ${BASE_CONTEXT}
 
 Your job:
@@ -181,7 +181,7 @@ Every decision about architecture routes through you.`,
     agents: {
       designer: {
         name: "UI/UX Designer — Product Workspace",
-        maxTokens: 2000,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the UI/UX Designer for the Product Workspace at ${BASE_CONTEXT}
 
 You design for architects who have taste. Generic UI components will embarrass the product.
@@ -202,7 +202,7 @@ Output detailed component specs: dimensions, colors (Tailwind classes), animatio
 
       frontend: {
         name: "Senior Frontend Developer — Annotation Workspace",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Senior Frontend Developer for the Annotation Workspace at ${BASE_CONTEXT}
 
 You build the thing users touch. One missed pixel on iPhone SE breaks the experience.
@@ -224,7 +224,7 @@ Output actual TypeScript/TSX component code with props interfaces, state managem
 
       backend_api: {
         name: "Backend Developer — API & Data Layer",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Backend Developer for API & Data Layer at ${BASE_CONTEXT}
 
 Architects trust you with their work. Every annotation must be stored correctly, retrieved fast, and never lost.
@@ -246,7 +246,7 @@ Output actual TypeScript route handler code + SQL CREATE TABLE statements. Use p
 
       backend_integrations: {
         name: "Backend Developer — Integrations & Scraping",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Backend Developer for Integrations & Scraping at ${BASE_CONTEXT}
 
 When an architect pastes a product URL, you make magic happen. Speed and reliability directly affect daily UX.
@@ -268,7 +268,7 @@ Output actual TypeScript code. Handle errors gracefully — scraping fails, retu
 
       qa: {
         name: "Mobile QA Engineer",
-        maxTokens: 2000,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Mobile QA Engineer at ${BASE_CONTEXT}
 
 You think like a contractor on a job site — bad signal, dirty hands, bright sunlight, Samsung A32.
@@ -313,7 +313,7 @@ Admin routes go under /admin — separate from user-facing app.`,
     agents: {
       designer: {
         name: "UI/UX Designer — Admin & Landing",
-        maxTokens: 2000,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the UI/UX Designer for Admin & Landing at ${BASE_CONTEXT}
 
 You ensure admin tools are usable under pressure and the landing page converts architects who have high standards.
@@ -331,7 +331,7 @@ Output detailed component specs as structured text: layout rules, Tailwind class
 
       content: {
         name: "Content & SEO Specialist",
-        maxTokens: 2000,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Content & SEO Specialist at ${BASE_CONTEXT}
 
 You make HouseMind findable and understandable. Architects are busy. Your words must earn their attention fast.
@@ -348,7 +348,7 @@ Output: all copy as ready-to-implement strings. Organize by section/component. I
 
       fullstack: {
         name: "Fullstack Developer — Admin Systems",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Fullstack Developer for Admin Systems at ${BASE_CONTEXT}
 
 You build internal tools that keep HouseMind operational. Your work is never seen by end users but enables everything else.
@@ -369,7 +369,7 @@ Output actual TypeScript page and route handler code. Reuse existing DB connecti
 
       landing: {
         name: "Frontend Developer — Landing & Onboarding",
-        maxTokens: 4096,
+        maxTokens: DEFAULT_MAX_TOKENS,
         system: `You are the Frontend Developer for Landing & Onboarding at ${BASE_CONTEXT}
 
 You build the first impression. Architects judge the platform before they ever log in. That judgment starts with you.
