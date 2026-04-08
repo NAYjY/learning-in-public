@@ -488,6 +488,24 @@ async function runBuild(teamKey, task) {
   const runDir = path.join(buildDir, timestamp);
   fs.mkdirSync(runDir, { recursive: true });
 
+  // --- Git integration: create new branch from current branch ---
+  const { execSync } = await import('child_process');
+  let currentBranch = '';
+  try {
+    currentBranch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8' }).trim();
+  } catch (e) {
+    console.error('Error: Not a git repository or cannot get current branch.');
+    process.exit(1);
+  }
+  const newBranch = `build/${teamKey}/${timestamp}`;
+  try {
+    execSync(`git checkout -b ${newBranch}`);
+    console.log(`\n[git] Created and switched to branch: ${newBranch}\n`);
+  } catch (e) {
+    console.error(`Error: Could not create branch ${newBranch}.`);
+    process.exit(1);
+  }
+
   // Load team report for context
   const meetingReport = getTeamReport(teamKey);
   const meetingContext = meetingReport
@@ -522,7 +540,16 @@ Be specific. Give each agent clear instructions on what code/artifacts to produc
     },
   ]);
   console.log(breakdown);
-  fs.writeFileSync(path.join(runDir, "0-head-breakdown.md"), breakdown);
+  const breakdownPath = path.join(runDir, "0-head-breakdown.md");
+  fs.writeFileSync(breakdownPath, breakdown);
+  // --- Git commit for head breakdown ---
+  try {
+    execSync(`git add "${breakdownPath}"`);
+    execSync(`git commit -m "[team-build] Head breakdown for ${teamKey} build run ${timestamp}"`);
+    console.log(`[git] Committed head breakdown.`);
+  } catch (e) {
+    console.error('Error: Could not commit head breakdown.');
+  }
 
   // Step 2: Run pipeline
   const outputs = {};
@@ -550,7 +577,16 @@ Be specific. Give each agent clear instructions on what code/artifacts to produc
     console.log(output);
     outputs[agentKey] = output;
     const fileIndex = team.pipeline.indexOf(agentKey) + 1;
-    fs.writeFileSync(path.join(runDir, `${fileIndex}-${agentKey}.md`), output);
+    const agentPath = path.join(runDir, `${fileIndex}-${agentKey}.md`);
+    fs.writeFileSync(agentPath, output);
+    // --- Git commit for agent output ---
+    try {
+      execSync(`git add "${agentPath}"`);
+      execSync(`git commit -m "[team-build] ${agent.name} output for ${teamKey} build run ${timestamp}"`);
+      console.log(`[git] Committed ${agent.name} output.`);
+    } catch (e) {
+      console.error(`Error: Could not commit ${agent.name} output.`);
+    }
   }
 
   // Step 3: Head consolidates
@@ -606,10 +642,25 @@ ${Object.entries(outputs)
 ${finalReport}
 `;
 
-  fs.writeFileSync(path.join(runDir, "build-report.md"), reportContent);
+  const reportPath = path.join(runDir, "build-report.md");
+  fs.writeFileSync(reportPath, reportContent);
 
   const latestPath = path.join(__dirname, "departments", teamKey, "build-report.md");
   fs.writeFileSync(latestPath, reportContent);
+  // --- Git commit for final report ---
+  try {
+    execSync(`git add "${reportPath}" "${latestPath}"`);
+    execSync(`git commit -m "[team-build] Final build report for ${teamKey} build run ${timestamp}"`);
+    console.log(`[git] Committed final build report.`);
+  } catch (e) {
+    console.error('Error: Could not commit final build report.');
+  }
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`  ✓ Build report: departments/${teamKey}/build-report.md`);
+  console.log(`  ✓ Run artifacts: departments/${teamKey}/build-runs/${timestamp}/`);
+  console.log(`  ✓ Git branch: ${newBranch}`);
+  console.log(`${"=".repeat(60)}`);
+  printTokenSummary();
 
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  ✓ Build report: departments/${teamKey}/build-report.md`);
