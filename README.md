@@ -52,6 +52,7 @@ so now prompt would not be so pain in the ass\
 >see that how token take and think the logs is too bloated as it would be the next input too\
 make logs compact but still in charecter, set up meeting rules\
 seperate the role and descprition to .md and action to .js and lean it\
+dry-run see input token correct. the out -put after recfactor is okay due limit it so able to costimate\
 >turn from python instaed of .js for god sake\
 >make them do meeting when nned by themsleves like after nig meeting then go to each team meeting then , big again // scrum until they want the owner input\
 >grant access to build.js file-writing ability can they do the git , new bracnh  each time we  order promt ,commit in each step\
@@ -68,10 +69,23 @@ repair the log from recuiting which is so long. let's keep it in recuiting.\
 >MEETING_RULES for tech is a must to not let them code in plan meeting mode.\
 
 After all that happen. yoi know. i think what we and people need is ai which would also gen agents. we could manula it too but some people dont even know what agent they need and how to get that with low-token./
-the process that i open project with low-specific agents first then after more detail recuit more agent specific is good call. 
+the process that i open project with low-specific agents first then after more detail recuit more agent specific is good call.
+
+Now AI have a graph that show if we stack too long in one seesion Ai would get hilucinate. we have to cut short each, sumerize then send it to the next seesion to still contain and focus./
+While other find the way to put more input in i try to make it compact and send it to the new session
+
+after ask it to promt me promt for new operation\
+it's a mess. in code is like three version still dont get the propose. Now I know I have to refactor it myself because this is now gambling. 0.2$ sounds nothing each time like we are in front of slot-machine. 
+but i use it enough to know how it's work now. dont fell to foreign any more. but Note that it's is just some multi-files not more that 10, have main pole of how to go.
+
+after i see the result of meeting. It sound fimilar with when i brain-strom the project. lots of same idea but yeah. the creative part is us. the operative of the knowleage zone we not pro gotta give it to AI. Like margeting part that in detail i dont know how to move. now i see how they construct it. Good to hear in specific of our project from a thing that invest in it too not just random guy from a bar. 
+
 
 ### now problem
 - reprot not all link each meeting after recfactor. it make each own dep have to gen it self but before that it 's not like it's make sence so strat new diagram is good clear
 - still confuse in Base_context. it should be solid and piont concept design. not have phase1 phsae2 MVP stuff.
 
-
+base_context have to be solid\
+we have team rprt from team. should we stilll have report from head dep?\
+we should just have summery report redaedy to be next promt just input dicision on it\
+but it would lack in detail\

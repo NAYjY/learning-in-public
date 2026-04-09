@@ -1,7 +1,3 @@
-// ./new/agents.js
-// HouseMind-specific agent definitions with full project context
-// For use with department.js and run.js
-
 // ─── BASE CONTEXT (shared across all agents) ──────────────────────────────────
 const BASE_CONTEXT = `HouseMind — a platform connecting architects, contractors, homeowners, and suppliers to visualize and agree on building products for house projects.
 
