@@ -12,315 +12,135 @@ const client = new Anthropic({ apiKey });
 
 const MODEL = "claude-sonnet-4-5";
 const COST_PER_1K_INPUT = 0.003;
-let totalTokens = 0;
+const COST_PER_1K_OUTPUT = 0.015;
+
+// ─── TOKEN BUDGET ─────────────────────────────────────────────────────────────
+const MAX_TOKENS_PER_RUN = 25000; // Higher for team pipelines (multiple agents)
+
+const PHASE_TOKEN_LIMITS = {
+  breakdown: 2000,
+  agent: 2500,
+  consolidate: 3000,
+  scrum: 1500,
+};
+
+const TOKEN_WARNING_THRESHOLD = 0.8;
+
+// Per-team tracking
+const teamTokens = {}; // { teamKey: { input: 0, output: 0 } }
+
+let totalInputTokens = 0;
+let totalOutputTokens = 0;
+let earlyStop = false;
 let DRY_RUN = false;
 
-async function estimateTokens(systemPrompt, messages) {
-  const response = await client.messages.countTokens({
-    model: MODEL,
-    system: systemPrompt,
-    messages: messages,
-  });
-  return response.input_tokens;
+// ─── MEETING RULES ────────────────────────────────────────────────────────────
+const MEETING_RULES = {
+  timeboxes: {
+    breakdown: "Max 5 minutes. Be decisive, not exhaustive.",
+    agent: "Max 10 minutes per agent. Focus on your specialization only.",
+    consolidate: "Max 10 minutes. Synthesize, don't repeat.",
+    scrum: "Max 5 minutes per exchange. Be direct, flag blockers.",
+  },
+  formatRules: [
+    "Use headers and bullet points. No walls of text.",
+    "Lead with the most important point.",
+    "If uncertain, say so explicitly — don't speculate as fact.",
+    "Flag cross-department dependencies immediately.",
+    "Use concrete examples over abstract descriptions.",
+  ],
+  escalationProtocol: [
+    "If a decision requires the founder, tag with [FOUNDER DECISION REQUIRED].",
+    "If blocked by another department, tag with [BLOCKED: <dept>].",
+    "If a risk is critical, tag with [CRITICAL RISK].",
+    "If scope is unclear, stop and ask — don't assume.",
+  ],
+};
+
+function buildMeetingRulesBlock(phase) {
+  const timebox = MEETING_RULES.timeboxes[phase] ?? "Stay focused and concise.";
+  const format = MEETING_RULES.formatRules.map((r) => `- ${r}`).join("\n");
+  const escalation = MEETING_RULES.escalationProtocol.map((r) => `- ${r}`).join("\n");
+
+  return `
+─── MEETING RULES ───────────────────────────────────────
+TIMEBOX: ${timebox}
+
+FORMAT RULES:
+${format}
+
+ESCALATION PROTOCOL:
+${escalation}
+─────────────────────────────────────────────────────────`;
 }
 
-// ─── Base context shared across all HouseMind agents ───
-const BASE_CONTEXT = `HouseMind — a platform connecting architects, contractors, homeowners, and suppliers to visualize and agree on building products for house projects.
+function injectMeetingRules(systemPrompt, phase) {
+  return `${systemPrompt}\n\n${buildMeetingRulesBlock(phase)}`;
+}
 
-Current state:
-- Architect-first, invite-only beta. Co-owner personally invites architects.
-- Stack: Next.js frontend (Vercel) + FastAPI backend (Railway) + PostgreSQL + S3
-- Auth: JWT invite-token system (magic links)
-- Mobile-first: Samsung A series, iPhone SE, iPad baseline
-- Thai + English support
+// ─── TOKEN BUDGET HELPERS ─────────────────────────────────────────────────────
 
-Architecture:
-- Next.js handles all UI, routing, and frontend logic
-- FastAPI handles all API endpoints, business logic, and DB access
-- PostgreSQL is the single source of truth
-- Frontend calls FastAPI via REST API
+function initTeamTokens(teamKey) {
+  if (!teamTokens[teamKey]) {
+    teamTokens[teamKey] = { input: 0, output: 0 };
+  }
+}
 
-MVP Scope (Phase 1):
-- Image carousel with reference images
-- Emoji annotation system (long-press → 8 emoji types → pin at x,y%)
-- Product linking (tap pin → paste URL → scrape images → pick one)
-- Product panel filtered by active pins
-- Hierarchical projects (main → subprojects)
-- Role-based access: Architect, Contractor, Homeowner, Supplier
-- Role-colored comments
-- Curated reference catalog (~100-150 products in tiles, fixtures, lighting, cladding)
-- "Reference" vs "available" labeling
-- "Request availability" button for demand-driven supplier recruitment
-- Inline feedback widget
+function recordTokens(teamKey, inputTokens, outputTokens = 0) {
+  initTeamTokens(teamKey);
+  teamTokens[teamKey].input += inputTokens;
+  teamTokens[teamKey].output += outputTokens;
+  totalInputTokens += inputTokens;
+  totalOutputTokens += outputTokens;
+}
 
-Database: 7 tables (users, invite_tokens, products, projects, project_members, project_products, comments, feedback)
+function getBudgetUsed() {
+  return totalInputTokens + totalOutputTokens;
+}
 
-Phase 1 Skip:
-- Pricing feeds
-- Revit integration
-- Supplier self-serve dashboard
-- Automated scraping pipelines
+function getBudgetPercent() {
+  return getBudgetUsed() / MAX_TOKENS_PER_RUN;
+}
 
-Success criteria:
-- 5+ architects create real boards
-- 3+ boards shared with homeowner/contractor
-- Feedback collected via 15-min calls after first week`;
+function checkBudget(phase, phaseTokens) {
+  const phaseLimit = PHASE_TOKEN_LIMITS[phase] ?? 2000;
+  const budgetUsed = getBudgetUsed();
+  const budgetPct = getBudgetPercent();
 
-// ─── Team definitions ───
-// Each team has a head + sub-agents. The head orchestrates the pipeline.
-const TEAMS = {
-  tech: {
-    head: {
-      name: "Head of Tech",
-      system: `You are the Head of Technology for ${BASE_CONTEXT}
+  if (phaseTokens > phaseLimit) {
+    console.warn(
+      `  ⚠️  Phase estimate (${phaseTokens}) exceeds limit for "${phase}" (${phaseLimit})`
+    );
+  }
 
-You lead a team of sub-agents: Frontend Dev, Backend Dev, Database Architect, Test & QA, Code Review, and Security.
+  if (budgetPct >= TOKEN_WARNING_THRESHOLD && budgetPct < 1.0) {
+    console.warn(
+      `  ⚠️  TOKEN WARNING: ${Math.round(budgetPct * 100)}% used (${budgetUsed}/${MAX_TOKENS_PER_RUN})`
+    );
+  }
 
-THIS IS A PLANNING AND ARCHITECTURE MEETING — not a build sprint.
-Your job is to:
-1. Receive a task and break it into planning sub-tasks for your team
-2. Ask each agent to produce SPECS, DECISIONS, and PLANS — NOT code implementations
-3. Review each sub-agent's output and consolidate into a department plan
-4. Write the final consolidated architecture/planning report
+  if (budgetUsed >= MAX_TOKENS_PER_RUN) {
+    earlyStop = true;
+    console.error(
+      `  🛑 BUDGET EXHAUSTED: ${budgetUsed}/${MAX_TOKENS_PER_RUN}. Stopping.`
+    );
+  }
 
-When breaking down tasks for your team, ask for:
-- Frontend Dev: component architecture, interaction flows, library choices, file structure
-- Backend Dev: API contract specs (endpoints, request/response shapes, auth rules), NOT code
-- Database Architect: schema design decisions, table relationships, index strategy, NOT SQL scripts
-- Test & QA: test strategy, coverage plan, key scenarios to test, NOT test code
-- Code Review: review of the proposed architecture for quality and consistency
-- Security: security risks in the proposed design and mitigation recommendations
+  return earlyStop;
+}
 
-Be decisive. Keep the breakdown concise — bullet points and decisions, not implementation details.
-The goal is a clean planning report that the team can use to start building.`,
-    },
+// ─── TEAMS PLACEHOLDER ────────────────────────────────────────────────────────
+import { TEAMS } from "./subAgents.js";
 
-    agents: {
-      frontend: {
-        name: "Frontend Dev",
-        system: `You are the Frontend Developer on the Tech team at ${BASE_CONTEXT}
-
-Your job:
-- Plan the React component architecture, page layouts, and client-side interaction patterns
-- Use the existing stack: Next.js 16 App Router, TypeScript, Tailwind CSS 4
-- Follow existing patterns: pages in src/app/, components in src/components/, lib in src/lib/
-- Handle: component architecture, state management (Zustand/Context), touch gestures, responsive layout, lazy loading
-- Think mobile-first: touch targets 44x44px min, thumb zones, swipe/long-press interactions
-- Specify which client libraries are needed (swiper, react-dnd, @use-gesture, etc.)
-- Output: component tree, props/state specs, interaction flows, file locations, key architectural decisions
-- Do NOT output full code implementations — describe what to build, how components connect, and what patterns to use
-- Flag if a design spec is missing or a UX decision is needed`,
-      },
-
-      backend: {
-        name: "Backend Dev",
-        system: `You are the Backend Developer on the Tech team at ${BASE_CONTEXT}
-
-Your job:
-- Design API routes (Next.js App Router route handlers in src/app/api/)
-- Handle: request validation, auth checks (JWT via jose), business logic, error responses
-- Use PostgreSQL via pg library with parameterized queries (no SQL injection)
-- Follow existing patterns: route.ts exports GET/POST/PATCH/DELETE, auth via src/lib/auth.ts
-- Plan: CRUD endpoints, image handling, web scraping routes, product-annotation linking
-- Output: API route specs — method, URL, request body shape, response JSON shape, auth requirements, validation rules, error cases
-- Do NOT output full route handler code — describe the API contract, key logic, and integration points
-- Flag performance concerns, missing indexes, or N+1 query risks`,
-      },
-
-      database: {
-        name: "Database Architect",
-        system: `You are the Database Architect on the Tech team at ${BASE_CONTEXT}
-
-Your job:
-- Design SQL schemas (PostgreSQL)
-- Current tables: users, invite_tokens, products, projects, project_members, project_products, comments, feedback
-- Design new tables for: project_images, annotations, annotation_products, project_objects
-- Design modifications to existing tables: projects (add parent_project_id), project_members (add role)
-- Specify: columns, types, constraints, foreign keys, indexes, ON DELETE behavior
-- Output: table designs as structured specs (table name, columns with types, relationships, indexes, constraints) — NOT full CREATE TABLE SQL
-- Do NOT output full migration scripts — describe the schema design, relationships, and key decisions
-- Consider: query performance, join patterns, data integrity, migration path from current schema
-- Flag: missing indexes, potential slow queries, data model decisions that affect API design`,
-      },
-
-      qa: {
-        name: "Test & QA",
-        system: `You are the Test & QA Lead on the Tech team at ${BASE_CONTEXT}
-
-Your job:
-- Define the test strategy and coverage plan for new features
-- Tests use Node.js built-in test runner (node:test + node:assert/strict), files go in app/tests/*.test.mjs
-- Identify what needs testing: edge cases, error paths, permission checks, validation rules
-- Output: test plan with categories (unit, contract, integration), key test scenarios, expected behaviors, and coverage gaps
-- Do NOT output full test code — describe WHAT to test, WHY it matters, and what the expected outcomes are
-- Flag bugs, logic errors, or inconsistencies you find in the proposed designs
-- Be thorough but pragmatic — focus on what matters, skip what doesn't`,
-      },
-
-      codereview: {
-        name: "Code Review",
-        system: `You are the Code Review Lead on the Tech team at ${BASE_CONTEXT}
-
-Your job:
-- Review proposed designs and specs for quality, consistency, and adherence to project patterns
-- Check: naming conventions, file organization, error handling approach, proper TypeScript patterns
-- Check: no duplication, proper separation of concerns, consistent patterns with existing code
-- Check: proper use of Next.js App Router conventions (route.ts exports, page.tsx patterns, server vs client components)
-- Rate the proposal: APPROVE, APPROVE WITH COMMENTS, or REQUEST CHANGES
-- Output: review findings with severity ratings and recommendations — do NOT reproduce large code blocks
-- Be constructive — explain why something should change, not just that it should
-- Keep reviews focused — don't nitpick style if logic is correct`,
-      },
-
-      security: {
-        name: "Security",
-        system: `You are the Security Lead on the Tech team at ${BASE_CONTEXT}
-
-Your job:
-- Audit proposed designs and specs for security vulnerabilities (OWASP Top 10)
-- Check: SQL injection risks, XSS vectors, CSRF, auth bypass possibilities
-- Check: JWT implementation approach (secret strength, expiry, httpOnly cookies, secure flag)
-- Check: authorization design (membership checks, role-based access, token validation)
-- Check: sensitive data exposure risks (passwords hashed? tokens not logged? env vars not hardcoded?)
-- Check: rate limiting needs, input validation gaps, error messages that could leak info
-- Rate: PASS, PASS WITH WARNINGS, or FAIL
-- Output: vulnerability findings with severity, attack scenarios, and mitigation recommendations — do NOT write full fix implementations
-- Be specific — describe the vulnerability pattern and recommend the fix approach`,
-      },
-    },
-
-    // Pipeline defines the order sub-agents run
-    // Each step can reference outputs from previous steps
-    pipeline: ["frontend", "backend", "database", "qa", "codereview", "security"],
-  },
-
-  marketing: {
-    head: {
-      name: "Head of Marketing",
-      system: `You are the Head of Marketing for ${BASE_CONTEXT}
-
-You lead a team of 6 sub-agents: Brand Strategist, Content Writer, Art & UI, UX Researcher, Growth Lead, and Community Manager.
-Your job is to:
-1. Receive a task and break it into sub-tasks for your team
-2. Review each sub-agent's output and decide if it passes or needs rework
-3. Write the final consolidated department deliverable
-4. You control the workflow — you decide what order agents run and what they get
-
-Be decisive. Push for clarity in visual direction, user experience, and go-to-market.
-Keep the pipeline moving — don't over-iterate.`,
-    },
-
-    agents: {
-      brand: {
-        name: "Brand Strategist",
-        system: `You are the Brand Strategist on the Marketing team at ${BASE_CONTEXT}
-
-Your job:
-- Define the visual identity: colors, tone, personality of HouseMind
-- Position the product: professional tool for architects? Fun visual tool for homeowners? Both? Find the angle
-- Define: app icon direction, emoji marker style (custom vs native), loading states, empty states, error states
-- Consider bilingual needs: English + Thai. Does the brand voice work in both languages?
-- Competitive positioning: how do we stand out from Houzz, Pinterest boards, Figma?
-- Flag where the brand is unclear or contradictory
-- Deliver: brand guidelines, positioning statement, tone-of-voice document, competitor positioning map`,
-      },
-
-      content: {
-        name: "Content Writer",
-        system: `You are the Content Writer on the Marketing team at ${BASE_CONTEXT}
-
-Your job:
-- Write all user-facing copy based on the brand direction
-- Microcopy: button labels, tooltips, onboarding prompts, empty states, error messages, confirmation dialogs
-- Landing page copy: headline, subhead, feature descriptions, CTAs
-- Email sequences: invite email, welcome email, first-project nudge, weekly digest
-- In-app onboarding: first-time user flow copy, feature discovery tooltips, annotation tutorial text
-- Blog post outlines: launch announcement, "how architects use HouseMind", case study templates
-- All copy must work in English AND Thai — flag phrases that don't translate well
-- Keep it concise. Architects are busy. Contractors don't read long paragraphs.
-- Deliver: microcopy document, email drafts, landing page copy, onboarding script`,
-      },
-
-      artui: {
-        name: "Art & UI",
-        system: `You are the Art & UI Designer on the Marketing team at ${BASE_CONTEXT}
-
-Your job:
-- Design UI layouts, visual hierarchy, and interaction patterns based on the brand direction and content
-- Specify colors, typography, spacing, component styling in Tailwind CSS terms
-- Design the emoji circular menu, annotation markers, carousel UI, modals, product panel
-- Think mobile-first: thumb zones, touch targets (min 44x44px), one-hand use
-- Design: app icon concepts, loading animations, empty state illustrations, onboarding screens
-- Consider the Thai market — Thai font (Prompt) support, reading patterns, cultural color meanings
-- Be specific: give exact Tailwind classes, sizes in rem/px, color hex codes
-- Flag where custom illustration or icon assets are needed vs what Tailwind/emoji can handle
-- You are NOT a coder — describe what it should look like and feel like, not how to code it
-- Deliver: wireframe descriptions, component styling specs, icon/emoji sizing, color palette with codes`,
-      },
-
-      ux: {
-        name: "UX Researcher",
-        system: `You are the UX Researcher on the Marketing team at ${BASE_CONTEXT}
-
-Your job:
-- Map user journeys and interaction flows for each user type (architect, contractor, homeowner, supplier)
-- Identify pain points, confusion risks, and cognitive load issues
-- Evaluate the brand direction, content copy, and UI designs — do they actually work for real users?
-- Evaluate touch interactions: is long-press discoverable? Do users understand emoji pins? Is the flow intuitive on mobile?
-- Research: what do competitors do? What patterns do Figma/Miro/Pinterest use for annotation?
-- Test assumptions: will contractors use this on a job site? Bad lighting, dirty hands, gloves?
-- Define usability test plans: what to test, with whom, how (remote/in-person)
-- Accessibility: color contrast, screen reader support, alternative to gesture-only interactions
-- You have final say on whether a design is usable — push back on Art & UI if it looks good but fails in practice
-- Deliver: user flow maps, usability concerns, interaction recommendations, test plans, accessibility audit`,
-      },
-
-      growth: {
-        name: "Growth Lead",
-        system: `You are the Growth Lead on the Marketing team at ${BASE_CONTEXT}
-
-Your job:
-- Plan user acquisition strategy for invite-only beta and beyond
-- Define the viral loop: architect creates project → shares with homeowner + contractor → they invite others
-- Analytics: what events to track? Funnel stages? Key metrics (activation, retention, referral)?
-- SEO: what pages need to exist? What keywords? Content strategy for organic discovery?
-- Paid: is it too early? If not, which channels (Google Ads, Instagram, LINE for Thai market)?
-- Referral program: how do we incentivize architects to invite more users?
-- Partnerships: architect associations, construction material expos, supplier networks?
-- Set specific KPIs for beta: target number of architects, boards created, shares, retention at day 7/30
-- Deliver: acquisition plan, funnel definition, analytics event list, KPI targets, referral program spec`,
-      },
-
-      community: {
-        name: "Community Manager",
-        system: `You are the Community Manager on the Marketing team at ${BASE_CONTEXT}
-
-Your job:
-- Build and nurture the early user community (architects, contractors, homeowners)
-- Plan: onboarding calls, feedback loops, user interviews, feature request collection
-- Support: how do users get help? In-app chat? Email? LINE? FAQ page?
-- Engagement: weekly tips, featured projects, user spotlights, product recommendations
-- Feedback pipeline: collect → categorize → prioritize → report to PM
-- Thai market specifics: LINE Official Account? Facebook group? What channels do Thai architects/contractors actually use?
-- Handle: beta user complaints, feature requests, bug reports, "how do I..." questions
-- Define: community guidelines, response time SLAs, escalation paths
-- Early warning system: if users are frustrated or churning, how do we catch it fast?
-- Deliver: community plan, support channel setup, feedback process, engagement calendar`,
-      },
-    },
-
-    pipeline: ["brand", "content", "artui", "ux", "growth", "community"],
-  },
-};
 
 // ─── Truncate text to stay within token budget ───
 function truncate(text, maxChars = 3000) {
+  if (!text) return "";
   if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars) + "\n\n... [truncated — full report in team-report.md] ...";
+  return text.slice(0, maxChars) + "\n\n... [truncated] ...";
 }
 
 // ─── Rate limit pacer ───
-// Free tier: ~15 req/min. Space calls ~12s apart to stay safe.
 const CALL_DELAY_MS = 12_000;
 let lastCallTime = 0;
 
@@ -337,10 +157,24 @@ async function paceCall() {
   lastCallTime = Date.now();
 }
 
+// ─── Token estimation ───
+async function estimateTokens(systemPrompt, messages) {
+  const response = await client.messages.countTokens({
+    model: MODEL,
+    system: systemPrompt,
+    messages: messages,
+  });
+  return response.input_tokens;
+}
+
 // ─── LLM call with retry ───
-async function chat(systemPrompt, messages, maxTokens = 3500) {
-  const tokens = await estimateTokens(systemPrompt, messages);
-  totalTokens += tokens;
+async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unknown", maxTokens = 3500 } = {}) {
+  const inputEstimate = await estimateTokens(systemPrompt, messages);
+
+  const stopped = checkBudget(phase, inputEstimate);
+  if (stopped) {
+    return "[stopped — token budget exhausted]";
+  }
 
   if (DRY_RUN) {
     const sysP = systemPrompt.slice(0, 150).replace(/\n/g, " ") + (systemPrompt.length > 150 ? "…" : "");
@@ -348,10 +182,12 @@ async function chat(systemPrompt, messages, maxTokens = 3500) {
     const msgP = String(last.content).slice(0, 200).replace(/\n/g, " ") + (String(last.content).length > 200 ? "…" : "");
     console.log(`  ┌ SYSTEM: ${sysP}`);
     console.log(`  │ ${last.role.toUpperCase()}: ${msgP}`);
-    console.log(`  └ ~${tokens} tokens\n`);
+    console.log(`  └ ~${inputEstimate} tokens (phase: ${phase}, limit: ${PHASE_TOKEN_LIMITS[phase] ?? "n/a"})\n`);
+    recordTokens(teamKey, inputEstimate, 0);
     return "[dry-run — skipped]";
   }
-  console.log(`  [~${tokens} input tokens]`);
+
+  console.log(`  [~${inputEstimate} input | phase: ${phase} | budget: ${getBudgetUsed()}/${MAX_TOKENS_PER_RUN}]`);
 
   for (let attempt = 0; attempt < 7; attempt++) {
     await paceCall();
@@ -362,19 +198,23 @@ async function chat(systemPrompt, messages, maxTokens = 3500) {
         system: systemPrompt,
         messages: messages,
       });
+
+      const outputTokens = response.usage?.output_tokens ?? 0;
+      recordTokens(teamKey, inputEstimate, outputTokens);
+      console.log(`  [output: ${outputTokens} tokens]`);
+
       return response.content[0].text;
     } catch (err) {
       if (err.status === 429 && attempt < 6) {
         const wait = (attempt + 1) * 20;
         console.log(`  [rate limited — waiting ${wait}s...]`);
         await new Promise((r) => setTimeout(r, wait * 1000));
-        lastCallTime = Date.now(); // reset pacer after long wait
+        lastCallTime = Date.now();
       } else if (err.status === 413 && attempt < 6) {
-        // Token limit — truncate messages and retry
-        console.log(`  [token limit hit — truncating and retrying...]`);
+        console.log(`  [token limit — truncating...]`);
         messages = messages.map((m) => ({
           ...m,
-          content: truncate(m.content, Math.floor(m.content.length * 0.6)),
+          content: truncate(String(m.content), Math.floor(String(m.content).length * 0.6)),
         }));
       } else {
         throw err;
@@ -402,7 +242,7 @@ function formatCrossTeamContext(otherReports) {
   const sections = otherReports
     .map((r) => `--- ${r.name} Report (summary) ---\n${truncate(r.content, 2000)}`)
     .join("\n\n");
-  return `\n\nCONTEXT FROM OTHER DEPARTMENTS (read this before starting):\n${sections}\n\n`;
+  return `\n\nCONTEXT FROM OTHER DEPARTMENTS:\n${sections}\n\n`;
 }
 
 // ─── Run a team pipeline ───
@@ -414,13 +254,14 @@ async function runTeam(teamKey, task) {
     process.exit(1);
   }
 
+  initTeamTokens(teamKey);
+
   const teamDir = path.join(__dirname, "departments", teamKey, "team-runs");
   fs.mkdirSync(teamDir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = path.join(teamDir, timestamp);
   fs.mkdirSync(runDir, { recursive: true });
 
-  // Load cross-team context
   const otherReports = getOtherTeamReports(teamKey);
   const crossTeamContext = formatCrossTeamContext(otherReports);
   if (otherReports.length > 0) {
@@ -430,76 +271,100 @@ async function runTeam(teamKey, task) {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  ${team.head.name} — Team Pipeline`);
   console.log(`  Task: ${task}`);
+  console.log(`  Budget: ${MAX_TOKENS_PER_RUN} tokens`);
   console.log(`${"=".repeat(60)}\n`);
 
-  // Step 1: Head breaks down the task
-  console.log(`[HEAD] Breaking down task for team...\n`);
+  // ── Phase 1: Head breakdown ──
+  console.log(`[HEAD] Breaking down task...\n`);
+  const headSystem = injectMeetingRules(team.head.system, "breakdown");
   const agentList = team.pipeline
     .map((k) => `- ${team.agents[k].name}: what should they do?`)
     .join("\n");
-  const breakdown = await chat(team.head.system, [
+
+  const breakdown = await chat(headSystem, [
     {
       role: "user",
       content: `Task for your team: ${task}
 ${crossTeamContext}
-Break this into specific sub-tasks for each of your team members:
+Break this into specific sub-tasks for each team member:
 ${agentList}
 
-Be specific. Give each agent clear instructions. If there are reports from other departments, use their findings to inform your breakdown.`,
+Be specific. Give each agent clear instructions.`,
     },
-  ]);
+  ], { teamKey, phase: "breakdown" });
+
   console.log(breakdown);
   fs.writeFileSync(path.join(runDir, "0-head-breakdown.md"), breakdown);
 
-  // Step 2: Run pipeline
+  if (earlyStop) {
+    console.warn("\n⚠️  Early stop after breakdown. Skipping agents.");
+    printTokenSummary();
+    return;
+  }
+
+  // ── Phase 2: Run pipeline ──
   const outputs = {};
 
   for (const agentKey of team.pipeline) {
+    if (earlyStop) break;
+
     const agent = team.agents[agentKey];
     console.log(`\n${"─".repeat(40)}`);
     console.log(`[${agent.name.toUpperCase()}] Working...\n`);
 
-    // Build context from previous agent outputs
     let previousContext = "";
     for (const [prevKey, prevOutput] of Object.entries(outputs)) {
       previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${truncate(prevOutput, 1500)}\n`;
     }
 
+    const agentSystem = injectMeetingRules(agent.system, "agent");
     const agentPrompt = previousContext
-      ? `Task from ${team.head.name}:\n${breakdown}\n\nPrevious team outputs:\n${previousContext}\n\nNow do your part. Focus on your specialization.`
-      : `Task from ${team.head.name}:\n${breakdown}\n\nYou are first in the pipeline. Do your part.`;
+      ? `Task from ${team.head.name}:\n${breakdown}\n\nPrevious outputs:\n${previousContext}\n\nNow do your part.`
+      : `Task from ${team.head.name}:\n${breakdown}\n\nYou are first. Do your part.`;
 
-    const output = await chat(agent.system, [
+    const output = await chat(agentSystem, [
       { role: "user", content: agentPrompt },
-    ]);
+    ], { teamKey, phase: "agent" });
 
     console.log(output);
     outputs[agentKey] = output;
     fs.writeFileSync(path.join(runDir, `${team.pipeline.indexOf(agentKey) + 1}-${agentKey}.md`), output);
   }
 
-  // Step 3: Head consolidates
+  if (earlyStop) {
+    console.warn("\n⚠️  Early stop during pipeline. Skipping consolidation.");
+    printTokenSummary();
+    return;
+  }
+
+  // ── Phase 3: Head consolidates ──
   console.log(`\n${"─".repeat(40)}`);
-  console.log(`[HEAD] Reviewing team outputs and writing final report...\n`);
+  console.log(`[HEAD] Writing final report...\n`);
 
   let allOutputs = "";
   for (const [agentKey, output] of Object.entries(outputs)) {
-    allOutputs += `\n## ${team.agents[agentKey].name} Output:\n${truncate(output, 1000)}\n\n---\n`;
+    allOutputs += `\n## ${team.agents[agentKey].name}:\n${truncate(output, 1000)}\n\n---\n`;
   }
 
-  const finalReport = await chat(team.head.system, [
+  const consolidateSystem = injectMeetingRules(team.head.system, "consolidate");
+  const finalReport = await chat(consolidateSystem, [
     { role: "user", content: `Task: ${task}` },
     { role: "assistant", content: breakdown },
     {
       role: "user",
-      content: `Your team has completed their work. Here are all outputs:\n${allOutputs}\n\nNow write the final consolidated report:\n1. Summary of what was delivered\n2. What each sub-agent produced (brief)\n3. Issues found and whether they were resolved\n4. Final verdict: is this ready to ship?\n5. Any items deferred to next iteration\n6. **HANDOFF TO OTHER DEPARTMENTS** — Write a specific section for each other team (${Object.keys(TEAMS).filter((k) => k !== teamKey).join(", ")}). What do they need to know from your work? What decisions affect them? What do you need from them? Be specific and actionable.`,
+      content: `Team outputs:\n${allOutputs}\n\nWrite final report:
+1. Summary
+2. Each agent's output (brief)
+3. Issues found
+4. Ready to ship?
+5. Deferred items
+6. **HANDOFF** — for each other team (${Object.keys(TEAMS).filter((k) => k !== teamKey).join(", ")}): what they need to know, what you need from them.`,
     },
-  ], 4000);
+  ], { teamKey, phase: "consolidate", maxTokens: 4000 });
 
   console.log(finalReport);
 
-  // Save final report
-  const reportContent = `# ${team.head.name} — Team Run Report
+  const reportContent = `# ${team.head.name} — Team Report
 
 **Date:** ${new Date().toISOString()}
 **Task:** ${task}
@@ -525,56 +390,53 @@ ${finalReport}
 `;
 
   fs.writeFileSync(path.join(runDir, "final-report.md"), reportContent);
-
-  // Also update latest
   const latestPath = path.join(__dirname, "departments", teamKey, "team-report.md");
   fs.writeFileSync(latestPath, reportContent);
 
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ✓ Team report saved: departments/${teamKey}/team-report.md`);
-  console.log(`  ✓ Run artifacts: departments/${teamKey}/team-runs/${timestamp}/`);
+  console.log(`  ✓ Report: departments/${teamKey}/team-report.md`);
+  console.log(`  ✓ Artifacts: departments/${teamKey}/team-runs/${timestamp}/`);
   console.log(`${"=".repeat(60)}`);
   printTokenSummary();
 }
 
 // ─── Scrum: cross-team agent pairing ───
-// Quick focused exchanges between agents from different teams
 const SCRUM_PAIRS = [
   {
     label: "UX ↔ Frontend",
     a: { team: "marketing", agent: "ux", name: "UX Researcher" },
     b: { team: "tech", agent: "frontend", name: "Frontend Dev" },
-    topic: "interaction patterns, touch UX feasibility, component behavior",
+    topic: "interaction patterns, touch UX feasibility",
   },
   {
     label: "Art & UI ↔ Frontend",
     a: { team: "marketing", agent: "artui", name: "Art & UI" },
     b: { team: "tech", agent: "frontend", name: "Frontend Dev" },
-    topic: "visual specs, Tailwind implementation, responsive layout",
+    topic: "visual specs, Tailwind, responsive layout",
   },
   {
     label: "UX ↔ Database",
     a: { team: "marketing", agent: "ux", name: "UX Researcher" },
     b: { team: "tech", agent: "database", name: "Database Architect" },
-    topic: "data model limits on UX flows, what queries are needed for the UI",
+    topic: "data model vs UX flow limits",
   },
   {
     label: "Content ↔ Backend",
     a: { team: "marketing", agent: "content", name: "Content Writer" },
     b: { team: "tech", agent: "backend", name: "Backend Dev" },
-    topic: "API error messages, validation messages, response copy for empty/error states",
+    topic: "error messages, validation copy",
   },
   {
     label: "Growth ↔ Backend",
     a: { team: "marketing", agent: "growth", name: "Growth Lead" },
     b: { team: "tech", agent: "backend", name: "Backend Dev" },
-    topic: "analytics events, tracking endpoints, funnel data collection",
+    topic: "analytics events, tracking",
   },
   {
     label: "Community ↔ UX",
     a: { team: "marketing", agent: "community", name: "Community Manager" },
     b: { team: "marketing", agent: "ux", name: "UX Researcher" },
-    topic: "user feedback patterns, common complaints, feature request priorities",
+    topic: "user feedback, feature priorities",
   },
 ];
 
@@ -589,16 +451,17 @@ async function runScrum(task) {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  🔄 SCRUM — Cross-Team Standup`);
   console.log(`  Topic: ${task}`);
+  console.log(`  Budget: ${MAX_TOKENS_PER_RUN} tokens`);
   console.log(`${"=".repeat(60)}`);
 
-  // Load both team reports for context
-  const allReports = getOtherTeamReports("__none__"); // gets all teams
-
+  const allReports = getOtherTeamReports("__none__");
   const reportContext = allReports.length > 0
-    ? allReports.map((r) => `--- ${r.name} Report ---\n${r.content}`).join("\n\n")
-    : "No team reports available yet.";
+    ? allReports.map((r) => `--- ${r.name} ---\n${truncate(r.content, 1500)}`).join("\n\n")
+    : "No team reports yet.";
 
   for (const pair of SCRUM_PAIRS) {
+    if (earlyStop) break;
+
     const agentA = TEAMS[pair.a.team]?.agents[pair.a.agent];
     const agentB = TEAMS[pair.b.team]?.agents[pair.b.agent];
     if (!agentA || !agentB) continue;
@@ -608,71 +471,104 @@ async function runScrum(task) {
     console.log(`${"─".repeat(50)}`);
     log += `## ${pair.label}\n**Focus:** ${pair.topic}\n\n`;
 
-    // Round 1: Agent A speaks first
+    const systemA = injectMeetingRules(agentA.system, "scrum");
+    const systemB = injectMeetingRules(agentB.system, "scrum");
+
+    // Round 1
     console.log(`\n[${pair.a.name}] →`);
-    const msgA = await chat(agentA.system, [
+    const msgA = await chat(systemA, [
       {
         role: "user",
-        content: `SCRUM STANDUP — You are in a quick cross-team sync with ${pair.b.name} from the ${pair.b.team} team.
+        content: `SCRUM with ${pair.b.name} (${pair.b.team}).
 Topic: ${task}
-Focus area: ${pair.topic}
+Focus: ${pair.topic}
 
-Context from team reports:\n${reportContext}
+Context:\n${reportContext}
 
-Share your key concerns, questions, or requirements for ${pair.b.name}. What do you need from them? What might not work? Keep it focused — 3-5 points max.`,
+Share 3-5 key concerns/questions for ${pair.b.name}.`,
       },
-    ]);
+    ], { teamKey: pair.a.team, phase: "scrum" });
     console.log(msgA);
     log += `### ${pair.a.name}\n${msgA}\n\n`;
 
-    // Round 2: Agent B responds
+    if (earlyStop) break;
+
+    // Round 2
     console.log(`\n[${pair.b.name}] →`);
-    const msgB = await chat(agentB.system, [
+    const msgB = await chat(systemB, [
       {
         role: "user",
-        content: `SCRUM STANDUP — You are in a quick cross-team sync with ${pair.a.name} from the ${pair.a.team} team.
+        content: `SCRUM with ${pair.a.name} (${pair.a.team}).
 Topic: ${task}
-Focus area: ${pair.topic}
+Focus: ${pair.topic}
 
-Context from team reports:\n${reportContext}
+Context:\n${reportContext}
 
 ${pair.a.name} said:\n${msgA}
 
-Respond directly. Answer their questions, push back where needed, flag blockers. What can you commit to? What needs more discussion? Keep it focused.`,
+Respond directly. What can you commit to?`,
       },
-    ]);
+    ], { teamKey: pair.b.team, phase: "scrum" });
     console.log(msgB);
     log += `### ${pair.b.name}\n${msgB}\n\n`;
 
-    // Round 3: Agent A final response
+    if (earlyStop) break;
+
+    // Round 3
     console.log(`\n[${pair.a.name}] (follow-up) →`);
-    const msgA2 = await chat(agentA.system, [
+    const msgA2 = await chat(systemA, [
       {
         role: "user",
-        content: `SCRUM FOLLOW-UP with ${pair.b.name}.
+        content: `Follow-up with ${pair.b.name}.
 
 You said:\n${msgA}
 
-${pair.b.name} responded:\n${msgB}
+They said:\n${msgB}
 
-Any final concerns, agreements, or action items? Keep it brief — 2-3 sentences. End with what is AGREED and what is UNRESOLVED.`,
+Final concerns? 2-3 sentences. End with AGREED and UNRESOLVED.`,
       },
-    ]);
+    ], { teamKey: pair.a.team, phase: "scrum" });
     console.log(msgA2);
     log += `### ${pair.a.name} (follow-up)\n${msgA2}\n\n---\n\n`;
   }
 
   fs.writeFileSync(logFile, log);
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ✓ Scrum log saved: departments/scrum-logs/scrum-${timestamp}.md`);
+  console.log(`  ✓ Scrum log: departments/scrum-logs/scrum-${timestamp}.md`);
   console.log(`${"=".repeat(60)}`);
   printTokenSummary();
 }
 
+// ─── Token Summary ───
 function printTokenSummary() {
-  const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  console.log(`\nTotal input tokens: ~${totalTokens}`);
-  console.log(`Estimated input cost: ~$${cost}`);
+  const totalUsed = getBudgetUsed();
+  const budgetPct = Math.round(getBudgetPercent() * 100);
+
+  const inputCost = ((totalInputTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  const outputCost = ((totalOutputTokens / 1000) * COST_PER_1K_OUTPUT).toFixed(4);
+  const totalCost = (parseFloat(inputCost) + parseFloat(outputCost)).toFixed(4);
+
+  console.log(`\n${"─".repeat(50)}`);
+  console.log(`TOKEN SUMMARY`);
+  console.log(`${"─".repeat(50)}`);
+  console.log(`  Budget:  ${totalUsed} / ${MAX_TOKENS_PER_RUN} (${budgetPct}%)`);
+  console.log(`  Input:   ${totalInputTokens}  → $${inputCost}`);
+  console.log(`  Output:  ${totalOutputTokens}  → $${outputCost}`);
+  console.log(`  Total:   ~$${totalCost}`);
+
+  if (Object.keys(teamTokens).length > 0) {
+    console.log(`\n  Per-team breakdown:`);
+    for (const [key, counts] of Object.entries(teamTokens)) {
+      const t = counts.input + counts.output;
+      const c = ((counts.input / 1000) * COST_PER_1K_INPUT + (counts.output / 1000) * COST_PER_1K_OUTPUT).toFixed(4);
+      console.log(`    ${key.padEnd(12)} in:${String(counts.input).padStart(5)} out:${String(counts.output).padStart(5)} = ${String(t).padStart(6)}  $${c}`);
+    }
+  }
+
+  if (earlyStop) {
+    console.log(`\n  🛑 Run ended early — budget exhausted.`);
+  }
+  console.log(`${"─".repeat(50)}\n`);
 }
 
 // ─── CLI ───
@@ -692,25 +588,35 @@ function askConfirm(question) {
   });
 }
 
+function resetState() {
+  totalInputTokens = 0;
+  totalOutputTokens = 0;
+  earlyStop = false;
+  for (const key of Object.keys(teamTokens)) delete teamTokens[key];
+}
+
 async function main() {
   if ((teamArg === "scrum" && taskArg) || (teamArg && taskArg)) {
-    // Phase 1: auto dry-run
+    // Dry run
     DRY_RUN = true;
-    console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+    console.log("\n🔍 DRY RUN — estimating tokens...\n");
     if (teamArg === "scrum") {
       await runScrum(taskArg);
     } else {
       await runTeam(teamArg, taskArg);
     }
+
     if (DRY_RUN_ONLY) process.exit(0);
 
-    // Confirm before real run
     const go = await askConfirm("\nProceed with real run? [y/N] ");
-    if (!go) { console.log("Aborted."); process.exit(0); }
+    if (!go) {
+      console.log("Aborted.");
+      process.exit(0);
+    }
 
-    // Phase 2: real run
+    // Real run
+    resetState();
     DRY_RUN = false;
-    totalTokens = 0;
     console.log("\n🚀 Running real pipeline...\n");
     if (teamArg === "scrum") {
       await runScrum(taskArg);
@@ -718,22 +624,19 @@ async function main() {
       await runTeam(teamArg, taskArg);
     }
   } else {
-  console.log(`
+    console.log(`
 Usage:
-  node team.js <team> <task>    Run a team pipeline
-  node team.js scrum <topic>    Cross-team standup (UX↔Frontend, Art↔Frontend, UX↔DB, Brand↔Backend)
+  node team.js <team> <task>       Run team pipeline (planning/specs)
+  node team.js scrum <topic>       Cross-team standup
+  node team.js --dry-run <...>     Estimate tokens only
 
-Teams: ${Object.keys(TEAMS).join(", ")}
+Teams: ${Object.keys(TEAMS).join(", ") || "(none loaded — import TEAMS)"}
 
 Each team has a Head who orchestrates sub-agents in a pipeline.
 Teams auto-read other departments' latest reports as context.
 Heads include a "Handoff to other departments" section in final reports.
 
-Tech team pipeline:
-  Head of Tech → Frontend Dev → Backend Dev → Database Architect → Test & QA → Code Review → Security → Head (final report)
-
-Marketing team pipeline:
-  Head of Marketing → Brand Strategist → Content Writer → Art & UI → UX Researcher → Growth Lead → Community Manager → Head (final report)
+team pipeline:
 
 Scrum pairs:
   UX Researcher ↔ Frontend Dev    (interaction patterns, touch feasibility)
@@ -744,10 +647,9 @@ Scrum pairs:
   Community Manager ↔ UX          (user feedback, complaints, feature priorities)
 
 Examples:
-  node team.js tech "Build the full annotation system"
-  node team.js tech --dry-run "Build the full annotation system"   (estimate tokens only)
-  node team.js marketing "Design the annotation workspace — brand direction, UI design, UX validation, mobile-first"
-  node team.js scrum "Align on the annotation system — does the UI design match what frontend can build?"
+  node team.js tech "Design the annotation system"
+  node team.js marketing "Plan beta launch messaging"
+  node team.js scrum "Align on annotation UX"
 `);
   }
 }
