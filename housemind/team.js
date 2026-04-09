@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
+import { execSync } from "child_process";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -12,132 +13,75 @@ const client = new Anthropic({ apiKey });
 
 const MODEL = "claude-sonnet-4-5";
 const COST_PER_1K_INPUT = 0.003;
-const COST_PER_1K_OUTPUT = 0.015;
-
-// ─── TOKEN BUDGET ─────────────────────────────────────────────────────────────
-const MAX_TOKENS_PER_RUN = 25000; // Higher for team pipelines (multiple agents)
-
-const PHASE_TOKEN_LIMITS = {
-  breakdown: 2000,
-  agent: 2500,
-  consolidate: 3000,
-  scrum: 1500,
-};
-
-const TOKEN_WARNING_THRESHOLD = 0.8;
-
-// Per-team tracking
-const teamTokens = {}; // { teamKey: { input: 0, output: 0 } }
-
-let totalInputTokens = 0;
-let totalOutputTokens = 0;
-let earlyStop = false;
+let totalTokens = 0;
 let DRY_RUN = false;
 
-// ─── MEETING RULES ────────────────────────────────────────────────────────────
-const MEETING_RULES = {
-  timeboxes: {
-    breakdown: "Max 5 minutes. Be decisive, not exhaustive.",
-    agent: "Max 10 minutes per agent. Focus on your specialization only.",
-    consolidate: "Max 10 minutes. Synthesize, don't repeat.",
-    scrum: "Max 5 minutes per exchange. Be direct, flag blockers.",
-  },
-  formatRules: [
-    "Use headers and bullet points. No walls of text.",
-    "Lead with the most important point.",
-    "If uncertain, say so explicitly — don't speculate as fact.",
-    "Flag cross-department dependencies immediately.",
-    "Use concrete examples over abstract descriptions.",
-  ],
-  escalationProtocol: [
-    "If a decision requires the founder, tag with [FOUNDER DECISION REQUIRED].",
-    "If blocked by another department, tag with [BLOCKED: <dept>].",
-    "If a risk is critical, tag with [CRITICAL RISK].",
-    "If scope is unclear, stop and ask — don't assume.",
-  ],
-};
+const DEFAULT_MAX_TOKENS = 4096;
 
-function buildMeetingRulesBlock(phase) {
-  const timebox = MEETING_RULES.timeboxes[phase] ?? "Stay focused and concise.";
-  const format = MEETING_RULES.formatRules.map((r) => `- ${r}`).join("\n");
-  const escalation = MEETING_RULES.escalationProtocol.map((r) => `- ${r}`).join("\n");
-
-  return `
-─── MEETING RULES ───────────────────────────────────────
-TIMEBOX: ${timebox}
-
-FORMAT RULES:
-${format}
-
-ESCALATION PROTOCOL:
-${escalation}
-─────────────────────────────────────────────────────────`;
-}
-
-function injectMeetingRules(systemPrompt, phase) {
-  return `${systemPrompt}\n\n${buildMeetingRulesBlock(phase)}`;
-}
-
-// ─── TOKEN BUDGET HELPERS ─────────────────────────────────────────────────────
-
-function initTeamTokens(teamKey) {
-  if (!teamTokens[teamKey]) {
-    teamTokens[teamKey] = { input: 0, output: 0 };
+// ─── Git helpers (local only — no push) ───
+function gitExec(cmd, opts = {}) {
+  try {
+    const out = execSync(cmd, { encoding: "utf-8", ...opts }).trim();
+    return { ok: true, out };
+  } catch (e) {
+    return { ok: false, out: e.message };
   }
 }
 
-function recordTokens(teamKey, inputTokens, outputTokens = 0) {
-  initTeamTokens(teamKey);
-  teamTokens[teamKey].input += inputTokens;
-  teamTokens[teamKey].output += outputTokens;
-  totalInputTokens += inputTokens;
-  totalOutputTokens += outputTokens;
-}
-
-function getBudgetUsed() {
-  return totalInputTokens + totalOutputTokens;
-}
-
-function getBudgetPercent() {
-  return getBudgetUsed() / MAX_TOKENS_PER_RUN;
-}
-
-function checkBudget(phase, phaseTokens) {
-  const phaseLimit = PHASE_TOKEN_LIMITS[phase] ?? 2000;
-  const budgetUsed = getBudgetUsed();
-  const budgetPct = getBudgetPercent();
-
-  if (phaseTokens > phaseLimit) {
-    console.warn(
-      `  ⚠️  Phase estimate (${phaseTokens}) exceeds limit for "${phase}" (${phaseLimit})`
-    );
+function gitCommit(files, message) {
+  if (DRY_RUN) return; // never touch git during dry-run
+  for (const f of files) {
+    const r = gitExec(`git add "${f}"`);
+    if (!r.ok) console.warn(`  [git] warn: could not stage ${f}`);
   }
-
-  if (budgetPct >= TOKEN_WARNING_THRESHOLD && budgetPct < 1.0) {
-    console.warn(
-      `  ⚠️  TOKEN WARNING: ${Math.round(budgetPct * 100)}% used (${budgetUsed}/${MAX_TOKENS_PER_RUN})`
-    );
+  const r = gitExec(`git commit -m "${message}"`);
+  if (r.ok) {
+    console.log(`  [git] ✓ ${message}`);
+  } else {
+    console.warn(`  [git] warn: commit failed — ${r.out}`);
   }
-
-  if (budgetUsed >= MAX_TOKENS_PER_RUN) {
-    earlyStop = true;
-    console.error(
-      `  🛑 BUDGET EXHAUSTED: ${budgetUsed}/${MAX_TOKENS_PER_RUN}. Stopping.`
-    );
-  }
-
-  return earlyStop;
 }
 
-// ─── TEAMS PLACEHOLDER ────────────────────────────────────────────────────────
-import { TEAMS } from "./subAgents.js";
+// Returns the new branch name, or null on failure.
+function gitCreateBranch(teamKey, taskSlug, timestamp) {
+  const base = gitExec("git rev-parse --abbrev-ref HEAD");
+  if (!base.ok) {
+    console.error("  [git] ✗ Not a git repo or cannot read HEAD.");
+    return null;
+  }
+  const branch = `build/${teamKey}/${taskSlug}-${timestamp}`;
+  const r = gitExec(`git checkout -b "${branch}"`);
+  if (!r.ok) {
+    console.error(`  [git] ✗ Could not create branch: ${r.out}`);
+    return null;
+  }
+  console.log(`  [git] ✓ New branch: ${branch}  (base: ${base.out})`);
+  return branch;
+}
 
+// Slugify task string for use in a branch name
+function slugify(text, maxLen = 40) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, maxLen);
+}
+
+// ─── Token estimation ───
+async function estimateTokens(systemPrompt, messages) {
+  const response = await client.messages.countTokens({
+    model: MODEL,
+    system: systemPrompt,
+    messages,
+  });
+  return response.input_tokens;
+}
 
 // ─── Truncate text to stay within token budget ───
-function truncate(text, maxChars = 3000) {
-  if (!text) return "";
+function truncate(text, maxChars = 5000) {
   if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars) + "\n\n... [truncated] ...";
+  return text.slice(0, maxChars) + "\n\n... [truncated — full output in build-report.md] ...";
 }
 
 // ─── Rate limit pacer ───
@@ -157,24 +101,10 @@ async function paceCall() {
   lastCallTime = Date.now();
 }
 
-// ─── Token estimation ───
-async function estimateTokens(systemPrompt, messages) {
-  const response = await client.messages.countTokens({
-    model: MODEL,
-    system: systemPrompt,
-    messages: messages,
-  });
-  return response.input_tokens;
-}
-
 // ─── LLM call with retry ───
-async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unknown", maxTokens = 3500 } = {}) {
-  const inputEstimate = await estimateTokens(systemPrompt, messages);
-
-  const stopped = checkBudget(phase, inputEstimate);
-  if (stopped) {
-    return "[stopped — token budget exhausted]";
-  }
+async function chat(systemPrompt, messages, maxTokens = DEFAULT_MAX_TOKENS) {
+  const tokens = await estimateTokens(systemPrompt, messages);
+  totalTokens += tokens;
 
   if (DRY_RUN) {
     const sysP = systemPrompt.slice(0, 150).replace(/\n/g, " ") + (systemPrompt.length > 150 ? "…" : "");
@@ -182,12 +112,10 @@ async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unkn
     const msgP = String(last.content).slice(0, 200).replace(/\n/g, " ") + (String(last.content).length > 200 ? "…" : "");
     console.log(`  ┌ SYSTEM: ${sysP}`);
     console.log(`  │ ${last.role.toUpperCase()}: ${msgP}`);
-    console.log(`  └ ~${inputEstimate} tokens (phase: ${phase}, limit: ${PHASE_TOKEN_LIMITS[phase] ?? "n/a"})\n`);
-    recordTokens(teamKey, inputEstimate, 0);
+    console.log(`  └ ~${tokens} tokens (max_output: ${maxTokens})\n`);
     return "[dry-run — skipped]";
   }
-
-  console.log(`  [~${inputEstimate} input | phase: ${phase} | budget: ${getBudgetUsed()}/${MAX_TOKENS_PER_RUN}]`);
+  console.log(`  [~${tokens} input tokens, max_output: ${maxTokens}]`);
 
   for (let attempt = 0; attempt < 7; attempt++) {
     await paceCall();
@@ -196,13 +124,8 @@ async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unkn
         model: MODEL,
         max_tokens: maxTokens,
         system: systemPrompt,
-        messages: messages,
+        messages,
       });
-
-      const outputTokens = response.usage?.output_tokens ?? 0;
-      recordTokens(teamKey, inputEstimate, outputTokens);
-      console.log(`  [output: ${outputTokens} tokens]`);
-
       return response.content[0].text;
     } catch (err) {
       if (err.status === 429 && attempt < 6) {
@@ -211,10 +134,10 @@ async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unkn
         await new Promise((r) => setTimeout(r, wait * 1000));
         lastCallTime = Date.now();
       } else if (err.status === 413 && attempt < 6) {
-        console.log(`  [token limit — truncating...]`);
+        console.log(`  [token limit hit — truncating and retrying...]`);
         messages = messages.map((m) => ({
           ...m,
-          content: truncate(String(m.content), Math.floor(String(m.content).length * 0.6)),
+          content: truncate(m.content, Math.floor(String(m.content).length * 0.6)),
         }));
       } else {
         throw err;
@@ -223,152 +146,190 @@ async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unkn
   }
 }
 
-// ─── Read other teams' latest reports for cross-team context ───
-function getOtherTeamReports(currentTeamKey) {
-  const otherReports = [];
-  for (const otherKey of Object.keys(TEAMS)) {
-    if (otherKey === currentTeamKey) continue;
-    const reportPath = path.join(__dirname, "departments", otherKey, "team-report.md");
-    if (fs.existsSync(reportPath)) {
-      const content = fs.readFileSync(reportPath, "utf-8");
-      otherReports.push({ team: otherKey, name: TEAMS[otherKey].head.name, content });
-    }
+// ─── Dynamic team loader ───
+// Each team lives in departments/<key>/team.json with this shape:
+//
+// {
+//   "head": {
+//     "name": "Alice (Head)",
+//     "system": "You are Alice, the engineering lead..."
+//   },
+//   "pipeline": ["frontend", "backend", "qa"],
+//   "agents": {
+//     "frontend": { "name": "Bob (Frontend)", "system": "You are Bob...", "maxTokens": 4096 },
+//     "backend":  { "name": "Carol (Backend)", "system": "You are Carol..." },
+//     "qa":       { "name": "Dave (QA)", "system": "You are Dave..." }
+//   }
+// }
+//
+// To add a new team: create departments/<key>/team.json — no code changes needed.
+
+function loadTeam(teamKey) {
+  const configPath = path.join(__dirname, "departments", teamKey, "team.json");
+  if (!fs.existsSync(configPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  } catch (e) {
+    console.error(`Error parsing ${configPath}: ${e.message}`);
+    return null;
   }
-  return otherReports;
 }
 
-function formatCrossTeamContext(otherReports) {
-  if (otherReports.length === 0) return "";
-  const sections = otherReports
-    .map((r) => `--- ${r.name} Report (summary) ---\n${truncate(r.content, 2000)}`)
-    .join("\n\n");
-  return `\n\nCONTEXT FROM OTHER DEPARTMENTS:\n${sections}\n\n`;
+function listTeams() {
+  const depDir = path.join(__dirname, "departments");
+  if (!fs.existsSync(depDir)) return [];
+  return fs.readdirSync(depDir).filter((name) => {
+    const cfg = path.join(depDir, name, "team.json");
+    return fs.existsSync(cfg);
+  });
 }
 
-// ─── Run a team pipeline ───
-async function runTeam(teamKey, task) {
-  const team = TEAMS[teamKey];
+// ─── Read team meeting/planning reports for context ───
+function getTeamReport(teamKey) {
+  const candidates = [
+    path.join(__dirname, "departments", teamKey, "team-report.md"),
+    path.join(__dirname, "departments", teamKey, "report.md"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8");
+  }
+  return null;
+}
+
+// ─── Run a build pipeline ───
+async function runBuild(teamKey, task) {
+  const team = loadTeam(teamKey);
   if (!team) {
-    console.error(`Unknown team: ${teamKey}`);
-    console.log("Available teams:", Object.keys(TEAMS).join(", "));
+    console.error(`Unknown team: "${teamKey}" — no departments/${teamKey}/team.json found.`);
+    const available = listTeams();
+    if (available.length) console.log("Available teams:", available.join(", "));
+    else console.log("No teams found. Create departments/<name>/team.json to add one.");
     process.exit(1);
   }
 
-  initTeamTokens(teamKey);
-
-  const teamDir = path.join(__dirname, "departments", teamKey, "team-runs");
-  fs.mkdirSync(teamDir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const runDir = path.join(teamDir, timestamp);
+  const buildDir = path.join(__dirname, "departments", teamKey, "build-runs");
+  fs.mkdirSync(buildDir, { recursive: true });
+  const runDir = path.join(buildDir, timestamp);
   fs.mkdirSync(runDir, { recursive: true });
 
-  const otherReports = getOtherTeamReports(teamKey);
-  const crossTeamContext = formatCrossTeamContext(otherReports);
-  if (otherReports.length > 0) {
-    console.log(`\n📋 Loaded reports from: ${otherReports.map((r) => r.name).join(", ")}`);
+  // ── Git: create branch ONLY on real run ──
+  let newBranch = null;
+  if (!DRY_RUN) {
+    const taskSlug = slugify(task);
+    newBranch = gitCreateBranch(teamKey, taskSlug, timestamp);
+    if (!newBranch) {
+      console.error("Aborting: could not create git branch.");
+      process.exit(1);
+    }
   }
+
+  // Load team report for context
+  const meetingReport = getTeamReport(teamKey);
+  const meetingContext = meetingReport
+    ? `\n\nCONTEXT FROM TEAM REPORT (use this to inform your implementation):\n${truncate(meetingReport, 4000)}\n\n`
+    : "";
 
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ${team.head.name} — Team Pipeline`);
+  console.log(`  🔨 ${team.head.name} — BUILD Pipeline`);
   console.log(`  Task: ${task}`);
-  console.log(`  Budget: ${MAX_TOKENS_PER_RUN} tokens`);
+  console.log(`  Team: ${teamKey} (${team.pipeline.length} agents)`);
+  if (newBranch) console.log(`  Branch: ${newBranch}`);
   console.log(`${"=".repeat(60)}\n`);
 
-  // ── Phase 1: Head breakdown ──
-  console.log(`[HEAD] Breaking down task...\n`);
-  const headSystem = injectMeetingRules(team.head.system, "breakdown");
+  if (meetingReport) console.log(`📋 Loaded team report for context\n`);
+
+  // ── Step 1: Head breaks down the task ──
+  console.log(`[HEAD] Breaking down build task for team...\n`);
   const agentList = team.pipeline
-    .map((k) => `- ${team.agents[k].name}: what should they do?`)
+    .map((k) => `- ${team.agents[k].name}: what should they build/implement?`)
     .join("\n");
 
-  const breakdown = await chat(headSystem, [
+  const breakdown = await chat(team.head.system, [
     {
       role: "user",
-      content: `Task for your team: ${task}
-${crossTeamContext}
-Break this into specific sub-tasks for each team member:
+      content: `BUILD TASK for your team: ${task}
+${meetingContext}
+Break this into specific implementation tasks for each of your team members:
 ${agentList}
 
-Be specific. Give each agent clear instructions.`,
+Be specific. Give each agent clear instructions on what code/artifacts to produce. Reference the team report if available.`,
     },
-  ], { teamKey, phase: "breakdown" });
-
+  ]);
   console.log(breakdown);
-  fs.writeFileSync(path.join(runDir, "0-head-breakdown.md"), breakdown);
 
-  if (earlyStop) {
-    console.warn("\n⚠️  Early stop after breakdown. Skipping agents.");
-    printTokenSummary();
-    return;
-  }
+  const breakdownPath = path.join(runDir, "0-head-breakdown.md");
+  fs.writeFileSync(breakdownPath, breakdown);
+  gitCommit(
+    [breakdownPath],
+    `[build] ${teamKey}: head breakdown — ${slugify(task, 50)}`
+  );
 
-  // ── Phase 2: Run pipeline ──
+  // ── Step 2: Run pipeline — one commit per agent ──
   const outputs = {};
 
   for (const agentKey of team.pipeline) {
-    if (earlyStop) break;
-
     const agent = team.agents[agentKey];
+    const agentMaxTokens = agent.maxTokens || DEFAULT_MAX_TOKENS;
     console.log(`\n${"─".repeat(40)}`);
-    console.log(`[${agent.name.toUpperCase()}] Working...\n`);
+    console.log(`[${agent.name.toUpperCase()}] Building... (max ${agentMaxTokens} tokens)\n`);
 
     let previousContext = "";
     for (const [prevKey, prevOutput] of Object.entries(outputs)) {
-      previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${truncate(prevOutput, 1500)}\n`;
+      previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${truncate(prevOutput, 3000)}\n`;
     }
 
-    const agentSystem = injectMeetingRules(agent.system, "agent");
     const agentPrompt = previousContext
-      ? `Task from ${team.head.name}:\n${breakdown}\n\nPrevious outputs:\n${previousContext}\n\nNow do your part.`
-      : `Task from ${team.head.name}:\n${breakdown}\n\nYou are first. Do your part.`;
+      ? `BUILD TASK from ${team.head.name}:\n${breakdown}\n\nPrevious team outputs:\n${previousContext}\n\nNow build your part. Output actual code and implementation artifacts.`
+      : `BUILD TASK from ${team.head.name}:\n${breakdown}\n\nYou are first in the pipeline. Build your part. Output actual code and implementation artifacts.`;
 
-    const output = await chat(agentSystem, [
-      { role: "user", content: agentPrompt },
-    ], { teamKey, phase: "agent" });
+    const output = await chat(agent.system, [{ role: "user", content: agentPrompt }], agentMaxTokens);
 
     console.log(output);
     outputs[agentKey] = output;
-    fs.writeFileSync(path.join(runDir, `${team.pipeline.indexOf(agentKey) + 1}-${agentKey}.md`), output);
+
+    const fileIndex = team.pipeline.indexOf(agentKey) + 1;
+    const agentPath = path.join(runDir, `${fileIndex}-${agentKey}.md`);
+    fs.writeFileSync(agentPath, output);
+    gitCommit(
+      [agentPath],
+      `[build] ${teamKey}: ${agent.name} output — ${slugify(task, 40)}`
+    );
   }
 
-  if (earlyStop) {
-    console.warn("\n⚠️  Early stop during pipeline. Skipping consolidation.");
-    printTokenSummary();
-    return;
-  }
-
-  // ── Phase 3: Head consolidates ──
+  // ── Step 3: Head consolidates ──
   console.log(`\n${"─".repeat(40)}`);
-  console.log(`[HEAD] Writing final report...\n`);
+  console.log(`[HEAD] Reviewing build outputs and writing final report...\n`);
 
   let allOutputs = "";
   for (const [agentKey, output] of Object.entries(outputs)) {
-    allOutputs += `\n## ${team.agents[agentKey].name}:\n${truncate(output, 1000)}\n\n---\n`;
+    allOutputs += `\n## ${team.agents[agentKey].name} Output:\n${truncate(output, 2000)}\n\n---\n`;
   }
 
-  const consolidateSystem = injectMeetingRules(team.head.system, "consolidate");
-  const finalReport = await chat(consolidateSystem, [
-    { role: "user", content: `Task: ${task}` },
+  const finalReport = await chat(team.head.system, [
+    { role: "user", content: `BUILD TASK: ${task}` },
     { role: "assistant", content: breakdown },
     {
       role: "user",
-      content: `Team outputs:\n${allOutputs}\n\nWrite final report:
-1. Summary
-2. Each agent's output (brief)
-3. Issues found
-4. Ready to ship?
-5. Deferred items
-6. **HANDOFF** — for each other team (${Object.keys(TEAMS).filter((k) => k !== teamKey).join(", ")}): what they need to know, what you need from them.`,
+      content: `Your team has completed their build work. Here are all outputs:\n${allOutputs}\n\nWrite the final build report:
+1. Summary of what was built
+2. Files created/modified by each agent
+3. Any blocking issues found (security, review, QA)
+4. Final verdict: ready to merge? or what needs follow-up?
+5. Handoff notes for other teams`,
     },
-  ], { teamKey, phase: "consolidate", maxTokens: 4000 });
-
+  ]);
   console.log(finalReport);
 
-  const reportContent = `# ${team.head.name} — Team Report
+  // ── Save & commit final report ──
+  const reportContent = `# ${team.head.name} — Build Report
 
 **Date:** ${new Date().toISOString()}
 **Task:** ${task}
+**Team:** ${teamKey}
+**Branch:** ${newBranch ?? "(dry-run)"}
 **Pipeline:** ${team.pipeline.map((k) => team.agents[k].name).join(" → ")}
+**Mode:** BUILD (code implementation)
 
 ---
 
@@ -389,186 +350,33 @@ ${Object.entries(outputs)
 ${finalReport}
 `;
 
-  fs.writeFileSync(path.join(runDir, "final-report.md"), reportContent);
-  const latestPath = path.join(__dirname, "departments", teamKey, "team-report.md");
+  const reportPath = path.join(runDir, "build-report.md");
+  fs.writeFileSync(reportPath, reportContent);
+
+  const latestPath = path.join(__dirname, "departments", teamKey, "build-report.md");
   fs.writeFileSync(latestPath, reportContent);
 
+  gitCommit(
+    [reportPath, latestPath],
+    `[build] ${teamKey}: final report — ${slugify(task, 40)}`
+  );
+
+  // ── Summary ──
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ✓ Report: departments/${teamKey}/team-report.md`);
-  console.log(`  ✓ Artifacts: departments/${teamKey}/team-runs/${timestamp}/`);
-  console.log(`${"=".repeat(60)}`);
-  printTokenSummary();
-}
-
-// ─── Scrum: cross-team agent pairing ───
-const SCRUM_PAIRS = [
-  {
-    label: "UX ↔ Frontend",
-    a: { team: "marketing", agent: "ux", name: "UX Researcher" },
-    b: { team: "tech", agent: "frontend", name: "Frontend Dev" },
-    topic: "interaction patterns, touch UX feasibility",
-  },
-  {
-    label: "Art & UI ↔ Frontend",
-    a: { team: "marketing", agent: "artui", name: "Art & UI" },
-    b: { team: "tech", agent: "frontend", name: "Frontend Dev" },
-    topic: "visual specs, Tailwind, responsive layout",
-  },
-  {
-    label: "UX ↔ Database",
-    a: { team: "marketing", agent: "ux", name: "UX Researcher" },
-    b: { team: "tech", agent: "database", name: "Database Architect" },
-    topic: "data model vs UX flow limits",
-  },
-  {
-    label: "Content ↔ Backend",
-    a: { team: "marketing", agent: "content", name: "Content Writer" },
-    b: { team: "tech", agent: "backend", name: "Backend Dev" },
-    topic: "error messages, validation copy",
-  },
-  {
-    label: "Growth ↔ Backend",
-    a: { team: "marketing", agent: "growth", name: "Growth Lead" },
-    b: { team: "tech", agent: "backend", name: "Backend Dev" },
-    topic: "analytics events, tracking",
-  },
-  {
-    label: "Community ↔ UX",
-    a: { team: "marketing", agent: "community", name: "Community Manager" },
-    b: { team: "marketing", agent: "ux", name: "UX Researcher" },
-    topic: "user feedback, feature priorities",
-  },
-];
-
-async function runScrum(task) {
-  const scrumDir = path.join(__dirname, "departments", "scrum-logs");
-  fs.mkdirSync(scrumDir, { recursive: true });
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const logFile = path.join(scrumDir, `scrum-${timestamp}.md`);
-
-  let log = `# Scrum Meeting\n\n**Date:** ${new Date().toISOString()}\n**Topic:** ${task}\n\n---\n\n`;
-
-  console.log(`\n${"=".repeat(60)}`);
-  console.log(`  🔄 SCRUM — Cross-Team Standup`);
-  console.log(`  Topic: ${task}`);
-  console.log(`  Budget: ${MAX_TOKENS_PER_RUN} tokens`);
-  console.log(`${"=".repeat(60)}`);
-
-  const allReports = getOtherTeamReports("__none__");
-  const reportContext = allReports.length > 0
-    ? allReports.map((r) => `--- ${r.name} ---\n${truncate(r.content, 1500)}`).join("\n\n")
-    : "No team reports yet.";
-
-  for (const pair of SCRUM_PAIRS) {
-    if (earlyStop) break;
-
-    const agentA = TEAMS[pair.a.team]?.agents[pair.a.agent];
-    const agentB = TEAMS[pair.b.team]?.agents[pair.b.agent];
-    if (!agentA || !agentB) continue;
-
-    console.log(`\n${"─".repeat(50)}`);
-    console.log(`  ${pair.label} — ${pair.topic}`);
-    console.log(`${"─".repeat(50)}`);
-    log += `## ${pair.label}\n**Focus:** ${pair.topic}\n\n`;
-
-    const systemA = injectMeetingRules(agentA.system, "scrum");
-    const systemB = injectMeetingRules(agentB.system, "scrum");
-
-    // Round 1
-    console.log(`\n[${pair.a.name}] →`);
-    const msgA = await chat(systemA, [
-      {
-        role: "user",
-        content: `SCRUM with ${pair.b.name} (${pair.b.team}).
-Topic: ${task}
-Focus: ${pair.topic}
-
-Context:\n${reportContext}
-
-Share 3-5 key concerns/questions for ${pair.b.name}.`,
-      },
-    ], { teamKey: pair.a.team, phase: "scrum" });
-    console.log(msgA);
-    log += `### ${pair.a.name}\n${msgA}\n\n`;
-
-    if (earlyStop) break;
-
-    // Round 2
-    console.log(`\n[${pair.b.name}] →`);
-    const msgB = await chat(systemB, [
-      {
-        role: "user",
-        content: `SCRUM with ${pair.a.name} (${pair.a.team}).
-Topic: ${task}
-Focus: ${pair.topic}
-
-Context:\n${reportContext}
-
-${pair.a.name} said:\n${msgA}
-
-Respond directly. What can you commit to?`,
-      },
-    ], { teamKey: pair.b.team, phase: "scrum" });
-    console.log(msgB);
-    log += `### ${pair.b.name}\n${msgB}\n\n`;
-
-    if (earlyStop) break;
-
-    // Round 3
-    console.log(`\n[${pair.a.name}] (follow-up) →`);
-    const msgA2 = await chat(systemA, [
-      {
-        role: "user",
-        content: `Follow-up with ${pair.b.name}.
-
-You said:\n${msgA}
-
-They said:\n${msgB}
-
-Final concerns? 2-3 sentences. End with AGREED and UNRESOLVED.`,
-      },
-    ], { teamKey: pair.a.team, phase: "scrum" });
-    console.log(msgA2);
-    log += `### ${pair.a.name} (follow-up)\n${msgA2}\n\n---\n\n`;
+  console.log(`  ✓ Build report : departments/${teamKey}/build-report.md`);
+  console.log(`  ✓ Run artifacts: departments/${teamKey}/build-runs/${timestamp}/`);
+  if (newBranch) {
+    console.log(`  ✓ Git branch   : ${newBranch}`);
+    console.log(`  ✓ No push — all commits are local only`);
   }
-
-  fs.writeFileSync(logFile, log);
-  console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ✓ Scrum log: departments/scrum-logs/scrum-${timestamp}.md`);
   console.log(`${"=".repeat(60)}`);
   printTokenSummary();
 }
 
-// ─── Token Summary ───
 function printTokenSummary() {
-  const totalUsed = getBudgetUsed();
-  const budgetPct = Math.round(getBudgetPercent() * 100);
-
-  const inputCost = ((totalInputTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  const outputCost = ((totalOutputTokens / 1000) * COST_PER_1K_OUTPUT).toFixed(4);
-  const totalCost = (parseFloat(inputCost) + parseFloat(outputCost)).toFixed(4);
-
-  console.log(`\n${"─".repeat(50)}`);
-  console.log(`TOKEN SUMMARY`);
-  console.log(`${"─".repeat(50)}`);
-  console.log(`  Budget:  ${totalUsed} / ${MAX_TOKENS_PER_RUN} (${budgetPct}%)`);
-  console.log(`  Input:   ${totalInputTokens}  → $${inputCost}`);
-  console.log(`  Output:  ${totalOutputTokens}  → $${outputCost}`);
-  console.log(`  Total:   ~$${totalCost}`);
-
-  if (Object.keys(teamTokens).length > 0) {
-    console.log(`\n  Per-team breakdown:`);
-    for (const [key, counts] of Object.entries(teamTokens)) {
-      const t = counts.input + counts.output;
-      const c = ((counts.input / 1000) * COST_PER_1K_INPUT + (counts.output / 1000) * COST_PER_1K_OUTPUT).toFixed(4);
-      console.log(`    ${key.padEnd(12)} in:${String(counts.input).padStart(5)} out:${String(counts.output).padStart(5)} = ${String(t).padStart(6)}  $${c}`);
-    }
-  }
-
-  if (earlyStop) {
-    console.log(`\n  🛑 Run ended early — budget exhausted.`);
-  }
-  console.log(`${"─".repeat(50)}\n`);
+  const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  console.log(`\nTotal input tokens: ~${totalTokens}`);
+  console.log(`Estimated input cost: ~$${cost}`);
 }
 
 // ─── CLI ───
@@ -588,70 +396,67 @@ function askConfirm(question) {
   });
 }
 
-function resetState() {
-  totalInputTokens = 0;
-  totalOutputTokens = 0;
-  earlyStop = false;
-  for (const key of Object.keys(teamTokens)) delete teamTokens[key];
-}
-
 async function main() {
-  if ((teamArg === "scrum" && taskArg) || (teamArg && taskArg)) {
-    // Dry run
-    DRY_RUN = true;
-    console.log("\n🔍 DRY RUN — estimating tokens...\n");
-    if (teamArg === "scrum") {
-      await runScrum(taskArg);
-    } else {
-      await runTeam(teamArg, taskArg);
-    }
+  if (!teamArg || !taskArg) {
+    // Build team list dynamically from departments/*/team.json
+    const available = listTeams();
+    const teamLines = available.length
+      ? available.map((key) => {
+          const t = loadTeam(key);
+          const pipeline = t?.pipeline?.map((k) => t.agents?.[k]?.name ?? k).join(" → ") ?? "?";
+          const desc = t?.description ? `  ${t.description}` : "";
+          return `  ${key.padEnd(12)}${desc}\n              Pipeline: ${pipeline}`;
+        }).join("\n\n")
+      : "  (none found — add departments/<name>/team.json to create one)";
 
-    if (DRY_RUN_ONLY) process.exit(0);
+    const exampleTeam = available[0] ?? "myteam";
 
-    const go = await askConfirm("\nProceed with real run? [y/N] ");
-    if (!go) {
-      console.log("Aborted.");
-      process.exit(0);
-    }
-
-    // Real run
-    resetState();
-    DRY_RUN = false;
-    console.log("\n🚀 Running real pipeline...\n");
-    if (teamArg === "scrum") {
-      await runScrum(taskArg);
-    } else {
-      await runTeam(teamArg, taskArg);
-    }
-  } else {
     console.log(`
 Usage:
-  node team.js <team> <task>       Run team pipeline (planning/specs)
-  node team.js scrum <topic>       Cross-team standup
-  node team.js --dry-run <...>     Estimate tokens only
+  node team-build.js <team> "<task>"
+  node team-build.js --dry-run <team> "<task>"
 
-Teams: ${Object.keys(TEAMS).join(", ") || "(none loaded — import TEAMS)"}
+Teams (auto-detected from departments/*/team.json):
 
-Each team has a Head who orchestrates sub-agents in a pipeline.
-Teams auto-read other departments' latest reports as context.
-Heads include a "Handoff to other departments" section in final reports.
-
-team pipeline:
-
-Scrum pairs:
-  UX Researcher ↔ Frontend Dev    (interaction patterns, touch feasibility)
-  Art & UI ↔ Frontend Dev         (visual specs, Tailwind, responsive)
-  UX Researcher ↔ Database        (data model vs UX flow limits)
-  Content Writer ↔ Backend Dev    (error messages, validation copy, empty states)
-  Growth Lead ↔ Backend Dev       (analytics events, tracking, funnel data)
-  Community Manager ↔ UX          (user feedback, complaints, feature priorities)
+${teamLines}
 
 Examples:
-  node team.js tech "Design the annotation system"
-  node team.js marketing "Plan beta launch messaging"
-  node team.js scrum "Align on annotation UX"
+  node team-build.js ${exampleTeam} "Build the login flow with auth and tests"
+  node team-build.js --dry-run ${exampleTeam} "Add dark mode support"
+
+Add a team:
+  Create departments/<name>/team.json — see README or existing teams for the schema.
+
+Outputs:
+  departments/<team>/build-report.md           ← latest build report
+  departments/<team>/build-runs/<timestamp>/   ← every run archived
+  git branch: build/<team>/<task-slug>-<ts>    ← local only, never pushed
 `);
+    process.exit(0);
   }
+
+  // ── Phase 1: dry-run (no git, no API calls) ──
+  DRY_RUN = true;
+  console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+  await runBuild(teamArg, taskArg);
+
+  const dryTokens = totalTokens;
+  const dryCost = ((dryTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  console.log(`\n——— Dry run complete ———`);
+  console.log(`Estimated input tokens : ~${dryTokens}`);
+  console.log(`Estimated input cost   : ~$${dryCost}`);
+
+  if (DRY_RUN_ONLY) process.exit(0);
+
+  // ── Confirm before real run ──
+  const go = await askConfirm("\nProceed with real build? [y/N] ");
+  if (!go) { console.log("Aborted."); process.exit(0); }
+
+  // ── Phase 2: real run (git branch + commits) ──
+  DRY_RUN = false;
+  totalTokens = 0;
+  console.log("\n🔨 Running build pipeline...\n");
+  await runBuild(teamArg, taskArg);
 }
 
 main().catch(console.error);
