@@ -1,19 +1,96 @@
+// run.js — Multi-agent meeting with full token budget system
 import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
 import { fileURLToPath } from "url";
-import { agents } from "./agents.js";
+import { meetingAgents as agents } from "./agents.js";
 
-// ─── Load all project context ───
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const KEY_FILE = path.join(__dirname, "..", "key.txt");
+const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
+const client = new Anthropic({ apiKey });
+
+const MODEL = "claude-sonnet-4-5";
+const COST_PER_1K_INPUT = 0.003;
+const COST_PER_1K_OUTPUT = 0.015;
+
+// ─── TOKEN BUDGET ─────────────────────────────────────────────────────────────
+const MAX_TOKENS_PER_MEETING = 15000;
+const TOKEN_WARNING_THRESHOLD = 0.8; // 80%
+
+// Per-agent tracking
+const agentTokens = {}; // { agentKey: { input: 0, output: 0 } }
+
+let totalInputTokens = 0;
+let totalOutputTokens = 0;
+let earlyStop = false;
+
+// ─── MEETING RULES ────────────────────────────────────────────────────────────
+const MEETING_RULES = {
+  formatRules: [
+    "Keep responses under 5 sentences unless synthesizing.",
+    "Lead with your position. Don't hedge.",
+    "If you disagree, say why specifically.",
+    "End with a question or challenge to keep the discussion moving.",
+    "Flag cross-department dependencies with [BLOCKED: <dept>].",
+  ],
+  escalationProtocol: [
+    "If a decision requires the founder, tag it with [FOUNDER DECISION REQUIRED].",
+    "If a risk is critical, tag with [CRITICAL RISK].",
+    "If scope is unclear, ask — don't assume.",
+  ],
+};
+
+function buildMeetingRulesBlock() {
+  const format = MEETING_RULES.formatRules.map((r) => `- ${r}`).join("\n");
+  const escalation = MEETING_RULES.escalationProtocol.map((r) => `- ${r}`).join("\n");
+
+  return `
+─── MEETING RULES ───────────────────────────────────────
+FORMAT:
+${format}
+
+ESCALATION:
+${escalation}
+─────────────────────────────────────────────────────────`;
+}
+
+function injectMeetingRules(systemPrompt) {
+  return `${systemPrompt}\n\n${buildMeetingRulesBlock()}`;
+}
+
+// ─── CLI ──────────────────────────────────────────────────────────────────────
+const args = process.argv.slice(2);
+const DRY_RUN_ONLY = args.includes("--dry-run");
+const filteredArgs = args.filter((a) => a !== "--dry-run");
+let DRY_RUN = false;
+
+const MAX_ROUNDS = 4;
+
+// ─── LOGGING ──────────────────────────────────────────────────────────────────
+const logsDir = path.join(__dirname, "logs");
+fs.mkdirSync(logsDir, { recursive: true });
+
+const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+const logFile = path.join(logsDir, `meeting-${timestamp}.md`);
+
+function log(text) {
+  if (!DRY_RUN) {
+    fs.appendFileSync(logFile, text + "\n");
+  }
+}
+
+// ─── CONTEXT LOADER ───────────────────────────────────────────────────────────
 function loadContext() {
   const parts = [];
   const deptDir = path.join(__dirname, "departments");
+
   for (const dept of ["tech", "marketing", "operations", "pm"]) {
     const reportPath = path.join(deptDir, dept, "report.md");
     if (fs.existsSync(reportPath)) {
       const content = fs.readFileSync(reportPath, "utf-8");
-      // Truncate each report to stay under token limits
       parts.push(`## ${dept.toUpperCase()} REPORT:\n${content.slice(0, 2000)}`);
     }
     const teamReportPath = path.join(deptDir, dept, "team-report.md");
@@ -24,17 +101,15 @@ function loadContext() {
   }
 
   // Add last meeting log if available
-  const logsDir = path.join(__dirname, "logs");
-  let lastMeeting = null;
   if (fs.existsSync(logsDir)) {
-    const files = fs.readdirSync(logsDir)
-      .filter(f => f.startsWith("meeting-") && f.endsWith(".md"))
+    const files = fs
+      .readdirSync(logsDir)
+      .filter((f) => f.startsWith("meeting-") && f.endsWith(".md"))
       .sort();
     if (files.length > 0) {
       const lastLog = files[files.length - 1];
       const logPath = path.join(logsDir, lastLog);
       const logContent = fs.readFileSync(logPath, "utf-8");
-      // Only include the last ~3000 chars to avoid token overflow
       parts.push(`## LAST MEETING LOG (${lastLog}):\n${logContent.slice(-3000)}`);
     }
   }
@@ -42,31 +117,52 @@ function loadContext() {
   return parts.join("\n\n---\n\n");
 }
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const logsDir = path.join(__dirname, "logs");
-fs.mkdirSync(logsDir, { recursive: true });
-
-const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-const logFile = path.join(logsDir, `meeting-${timestamp}.md`);
-
-function log(text) {
-  fs.appendFileSync(logFile, text + "\n");
+// ─── TOKEN BUDGET HELPERS ─────────────────────────────────────────────────────
+function initAgentTokens(agentKey) {
+  if (!agentTokens[agentKey]) {
+    agentTokens[agentKey] = { input: 0, output: 0 };
+  }
 }
 
-const KEY_FILE = path.join(__dirname, "..", "key.txt");
-const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
-const client = new Anthropic({ apiKey });
+function recordTokens(agentKey, inputTokens, outputTokens = 0) {
+  initAgentTokens(agentKey);
+  agentTokens[agentKey].input += inputTokens;
+  agentTokens[agentKey].output += outputTokens;
+  totalInputTokens += inputTokens;
+  totalOutputTokens += outputTokens;
+}
 
-const args = process.argv.slice(2);
-const DRY_RUN_ONLY = args.includes("--dry-run");
-const filteredArgs = args.filter((a) => a !== "--dry-run");
-let DRY_RUN = false;
-let totalTokens = 0;
+function getBudgetUsed() {
+  return totalInputTokens + totalOutputTokens;
+}
 
-const MODEL = "claude-sonnet-4-5";
-// const MODEL = "claude-opus-4-5";
-const COST_PER_1K_INPUT = 0.003; // Sonnet input pricing
+function getBudgetPercent() {
+  return getBudgetUsed() / MAX_TOKENS_PER_MEETING;
+}
 
+function checkBudget() {
+  const budgetUsed = getBudgetUsed();
+  const budgetPct = getBudgetPercent();
+
+  // 80% warning
+  if (budgetPct >= TOKEN_WARNING_THRESHOLD && budgetPct < 1.0) {
+    console.warn(
+      `  ⚠️  TOKEN BUDGET WARNING: ${Math.round(budgetPct * 100)}% used (${budgetUsed}/${MAX_TOKENS_PER_MEETING})`
+    );
+  }
+
+  // 100% hard stop
+  if (budgetUsed >= MAX_TOKENS_PER_MEETING) {
+    earlyStop = true;
+    console.error(
+      `  🛑 TOKEN BUDGET EXHAUSTED: ${budgetUsed}/${MAX_TOKENS_PER_MEETING} tokens used. Stopping meeting.`
+    );
+  }
+
+  return earlyStop;
+}
+
+// ─── CORE CHAT ────────────────────────────────────────────────────────────────
 async function estimateTokens(systemPrompt, messages) {
   const response = await client.messages.countTokens({
     model: MODEL,
@@ -76,32 +172,56 @@ async function estimateTokens(systemPrompt, messages) {
   return response.input_tokens;
 }
 
-const MAX_ROUNDS = 4;
-
 async function chat(agentKey, history) {
   const agent = agents[agentKey];
-  const tokens = await estimateTokens(agent.system, history);
-  totalTokens += tokens;
+  if (!agent) {
+    console.error(`Unknown agent: ${agentKey}`);
+    return "[error — unknown agent]";
+  }
+
+  const systemPrompt = injectMeetingRules(agent.system);
+  const inputEstimate = await estimateTokens(systemPrompt, history);
+
+  // Check budget before calling
+  if (checkBudget()) {
+    return "[stopped — token budget exhausted]";
+  }
 
   if (DRY_RUN) {
-    const sysP = agent.system.slice(0, 150).replace(/\n/g, " ") + (agent.system.length > 150 ? "…" : "");
+    const sysP =
+      systemPrompt.slice(0, 150).replace(/\n/g, " ") +
+      (systemPrompt.length > 150 ? "…" : "");
     const last = history[history.length - 1];
-    const msgP = String(last.content).slice(0, 200).replace(/\n/g, " ") + (String(last.content).length > 200 ? "…" : "");
+    const msgP =
+      String(last.content).slice(0, 200).replace(/\n/g, " ") +
+      (String(last.content).length > 200 ? "…" : "");
     console.log(`  ┌ [${agent.name}] SYSTEM: ${sysP}`);
     console.log(`  │ ${last.role.toUpperCase()}: ${msgP}`);
-    console.log(`  └ ~${tokens} tokens\n`);
+    console.log(
+      `  └ ~${inputEstimate} input tokens | budget: ${getBudgetUsed()}/${MAX_TOKENS_PER_MEETING}\n`
+    );
+
+    recordTokens(agentKey, inputEstimate, 0);
     return "[dry-run — skipped]";
   }
-  console.log(`  [${agent.name}: ~${tokens} input tokens]`);
+
+  console.log(
+    `  [${agent.name}: ~${inputEstimate} input | budget: ${getBudgetUsed()}/${MAX_TOKENS_PER_MEETING}]`
+  );
 
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: 400,
-        system: agent.system,
+        system: systemPrompt,
         messages: history,
       });
+
+      const outputTokens = response.usage?.output_tokens ?? 0;
+      recordTokens(agentKey, inputEstimate, outputTokens);
+
+      console.log(`  [output: ${outputTokens} tokens]`);
       return response.content[0].text;
     } catch (err) {
       if (err.status === 429 && attempt < 4) {
@@ -115,6 +235,7 @@ async function chat(agentKey, history) {
   }
 }
 
+// ─── MEETING RUNNER ───────────────────────────────────────────────────────────
 function formatMessage(speaker, text) {
   const msg = `\n[${speaker}]\n${text}\n`;
   console.log(msg);
@@ -123,45 +244,117 @@ function formatMessage(speaker, text) {
 
 async function runMeeting(topic) {
   const history = [];
-  // Load project context and prepend as system message
   const context = loadContext();
-  
-  let round = 0;
 
   console.log("\n--- Meeting started ---");
-  console.log(`Topic: ${topic}\n`);
+  console.log(`Topic: ${topic}`);
+  console.log(
+    `Token budget: ${MAX_TOKENS_PER_MEETING} | Warning at ${TOKEN_WARNING_THRESHOLD * 100}%\n`
+  );
   log(`# Meeting Log\n`);
   log(`**Date:** ${new Date().toISOString()}\n`);
   log(`**Topic:** ${topic}\n`);
   log(`---\n`);
+
   const opening = context
     ? `## BRIEFING — READ BEFORE SPEAKING:\n${context}\n\n---\n\nWe need to discuss: ${topic}. Marketing, what's your take?`
     : `We need to discuss: ${topic}. Marketing, what's your take?`;
-  // const opening = `We need to discuss: ${topic}. Marketing, what's your take?`;
+
   history.push({ role: "user", content: opening });
 
-  while (round < MAX_ROUNDS) {
+  let round = 0;
+  while (round < MAX_ROUNDS && !earlyStop) {
     round++;
     log(`## Round ${round}\n`);
+    console.log(`\n--- Round ${round} ---`);
 
     for (const role of ["marketing", "operations", "tech"]) {
+      if (earlyStop) break;
+
       const reply = await chat(role, history);
       formatMessage(agents[role].name, reply);
-      history.push({ role: "assistant", content: `[${agents[role].name}]: ${reply}` });
+
+      if (reply.includes("[stopped")) break;
+
+      history.push({
+        role: "assistant",
+        content: `[${agents[role].name}]: ${reply}`,
+      });
       history.push({ role: "user", content: "Continue the discussion." });
     }
   }
 
-  console.log("\n--- PM steps in ---");
-  log(`## PM Summary\n`);
-  const pmReply = await chat("manager", history);
-  formatMessage(agents.manager.name, pmReply);
+  if (earlyStop) {
+    console.log("\n⚠️  Meeting ended early due to token budget.");
+    log(`\n---\n\n**Meeting ended early — token budget exhausted.**\n`);
+  }
 
-  return pmReply;
+  // PM summary (if budget allows)
+  if (!earlyStop) {
+    console.log("\n--- PM steps in ---");
+    log(`## PM Summary\n`);
+    const pmReply = await chat("manager", history);
+    formatMessage(agents.manager.name, pmReply);
+  }
+
+  return;
 }
 
+// ─── TOKEN SUMMARY ────────────────────────────────────────────────────────────
+function printTokenSummary() {
+  const totalUsed = getBudgetUsed();
+  const budgetPct = Math.round(getBudgetPercent() * 100);
+
+  const inputCost = ((totalInputTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  const outputCost = ((totalOutputTokens / 1000) * COST_PER_1K_OUTPUT).toFixed(4);
+  const totalCost = (parseFloat(inputCost) + parseFloat(outputCost)).toFixed(4);
+
+  console.log(`\n${"─".repeat(50)}`);
+  console.log(`TOKEN SUMMARY`);
+  console.log(`${"─".repeat(50)}`);
+  console.log(
+    `  Budget used:    ${totalUsed} / ${MAX_TOKENS_PER_MEETING} (${budgetPct}%)`
+  );
+  console.log(`  Input tokens:   ${totalInputTokens}  → $${inputCost}`);
+  console.log(`  Output tokens:  ${totalOutputTokens}  → $${outputCost}`);
+  console.log(`  Total cost:     ~$${totalCost}`);
+
+  // Per-agent breakdown
+  if (Object.keys(agentTokens).length > 0) {
+    console.log(`\n  Per-agent breakdown:`);
+    for (const [key, counts] of Object.entries(agentTokens)) {
+      const agentTotal = counts.input + counts.output;
+      const agentCost = (
+        (counts.input / 1000) * COST_PER_1K_INPUT +
+        (counts.output / 1000) * COST_PER_1K_OUTPUT
+      ).toFixed(4);
+      console.log(
+        `    ${key.padEnd(12)} in: ${String(counts.input).padStart(5)}  out: ${String(counts.output).padStart(5)}  total: ${String(agentTotal).padStart(6)}  cost: $${agentCost}`
+      );
+    }
+  }
+
+  if (earlyStop) {
+    console.log(`\n  🛑 Meeting ended early — budget ceiling hit.`);
+  }
+
+  console.log(`${"─".repeat(50)}\n`);
+}
+
+// ─── RESET STATE ──────────────────────────────────────────────────────────────
+function resetState() {
+  totalInputTokens = 0;
+  totalOutputTokens = 0;
+  earlyStop = false;
+  for (const key of Object.keys(agentTokens)) delete agentTokens[key];
+}
+
+// ─── CONFIRM HELPER ───────────────────────────────────────────────────────────
 function askConfirm(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
   return new Promise((resolve) => {
     rl.question(question, (answer) => {
       rl.close();
@@ -170,37 +363,40 @@ function askConfirm(question) {
   });
 }
 
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
 async function main() {
-  const topic = filteredArgs[0] || "What should we build first — supplier onboarding or the owner visualization tool?";
+  const topic =
+    filteredArgs[0] ||
+    "What should we build first — supplier onboarding or the owner visualization tool?";
 
-  // // Phase 1: auto dry-run
-  // DRY_RUN = true;
-  // console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
-  // await runMeeting(topic);
+  // Phase 1: dry-run estimate
+  DRY_RUN = true;
+  console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
+  await runMeeting(topic);
+  printTokenSummary();
 
-  // const dryTokens = totalTokens;
-  // const dryCost = ((dryTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  // console.log(`\n——— Dry run complete ———`);
-  // console.log(`Total input tokens: ~${dryTokens}`);
-  // console.log(`Estimated input cost: ~$${dryCost}`);
+  if (DRY_RUN_ONLY) {
+    console.log("(--dry-run flag set, exiting before real run)");
+    process.exit(0);
+  }
 
-  // if (DRY_RUN_ONLY) process.exit(0);
+  // Reset for real run
+  resetState();
 
   // Confirm before real run
-  const go = await askConfirm("\nProceed with real run? [y/N] ");
-  if (!go) { console.log("Aborted."); process.exit(0); }
+  const go = await askConfirm("Proceed with real run? [y/N] ");
+  if (!go) {
+    console.log("Aborted.");
+    process.exit(0);
+  }
 
   // Phase 2: real run
   DRY_RUN = false;
-  totalTokens = 0;
   console.log("\n🚀 Running real meeting...\n");
   await runMeeting(topic);
+  printTokenSummary();
 
-  const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  console.log(`\n——— Meeting complete ———`);
-  console.log(`Total input tokens: ~${totalTokens}`);
-  console.log(`Estimated input cost: ~$${cost}`);
-  console.log(`\nMeeting log saved to: ${logFile}\n`);
+  console.log(`Meeting log saved to: ${logFile}\n`);
 }
 
 main().catch(console.error);
