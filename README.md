@@ -65,6 +65,13 @@ create my own chatbot for the sake of sanity\
 now things smoother use the chatbot to fix it own self\
 use chatbot to do token handling.
 repair the log from recuiting which is so long. let's keep it in recuiting.\
-MEETING_RULES for tech is a must to not let them code in plan meeting mode.
+>MEETING_RULES for tech is a must to not let them code in plan meeting mode.\
+
+After all that happen. yoi know. i think what we and people need is ai which would also gen agents. we could manula it too but some people dont even know what agent they need and how to get that with low-token./
+the process that i open project with low-specific agents first then after more detail recuit more agent specific is good call. 
+
+### now problem
+- reprot not all link each meeting after recfactor. it make each own dep have to gen it self but before that it 's not like it's make sence so strat new diagram is good clear
+- still confuse in Base_context. it should be solid and piont concept design. not have phase1 phsae2 MVP stuff.
 
 
