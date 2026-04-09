@@ -10,9 +10,16 @@ const CODE_DIR = path.join(__dirname, "chatbot", "code");
 const CHAT_LOG_FILE = path.join(LOGS_DIR, `session-${new Date().toISOString().slice(0, 10)}.md`);
 
 const KEY_FILE = path.join(__dirname, "..", "key.txt");
-const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
+let apiKey;
+try {
+  apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
+} catch {
+  console.error("Error: key.txt not found. Add your API key to ../key.txt");
+  process.exit(1);
+}
 const client = new Anthropic({ apiKey });
 
+// const MODEL = "claude-sonnet-4-6";
 const MODEL = "claude-opus-4-5";
 let sessionTokens = 0;
 
@@ -74,8 +81,15 @@ function appendChatLog(role, text) {
 
 // ─── Save code file ───
 function saveCodeFile(filename, content) {
-  fs.mkdirSync(CODE_DIR, { recursive: true });
-  const filePath = path.join(CODE_DIR, filename);
+  let filePath;
+
+  if (filename.startsWith("./") || filename.startsWith("../") || path.isAbsolute(filename)) {
+    filePath = path.resolve(process.cwd(), filename);
+  } else {
+    filePath = path.join(CODE_DIR, filename);
+  }
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
   return filePath;
 }
@@ -96,10 +110,13 @@ function isSupportedTextFile(filePath) {
 }
 
 // ─── Detect file paths in a message and inject their contents ───
-// Looks for patterns like: ./foo.js, ../bar.md, /abs/path.txt, or plain file.py
 function injectFiles(message) {
-  // Match file-path-like tokens: starts with ./ ../ / or is word.ext
-  const filePattern = /(?:\.{1,2}\/|\/)?[\w\-./]+\.(?:txt|md|js|mjs|cjs|ts|tsx|jsx|py|rb|php|java|c|cpp|h|hpp|cs|go|rs|swift|kt|scala|sh|bash|zsh|fish|html|css|scss|sass|less|xml|yaml|yml|toml|ini|env|json|sql|graphql|gql|r|lua|vim|conf|log)\b/g;
+  const cwd = process.cwd();
+  const extList = [...TEXT_EXTENSIONS].join("|");
+  const filePattern = new RegExp(
+    `(?:\\.{1,2}\\/|\\/)?[\\w\\-./]+\\.(?:${extList})\\b`,
+    "g"
+  );
 
   const matches = [...new Set(message.match(filePattern) || [])];
   if (matches.length === 0) return { message, injected: [] };
@@ -108,7 +125,8 @@ function injectFiles(message) {
   let enriched = message;
 
   for (const rawPath of matches) {
-    const resolved = path.resolve(process.cwd(), rawPath);
+    const resolved = path.resolve(cwd, rawPath);
+    if (!resolved.startsWith(cwd + path.sep) && resolved !== cwd) continue;
     if (!fs.existsSync(resolved)) continue;
     if (!isSupportedTextFile(resolved)) continue;
 
@@ -126,9 +144,8 @@ function injectFiles(message) {
 }
 
 // ─── Extract code blocks from a reply ───
-// Returns array of { lang, code }
 function extractCodeBlocks(text) {
-  const regex = /```(\w*)\n([\s\S]*?)```/g;
+  const regex = /```(\w*)\n([\s\S]*?)```[ \t]*$/gm;
   const blocks = [];
   let match;
   while ((match = regex.exec(text)) !== null) {
@@ -137,16 +154,45 @@ function extractCodeBlocks(text) {
   return blocks;
 }
 
+// ─── Multiline input — Ctrl+D to send ───
+function readMultilineInput(prompt) {
+  return new Promise((resolve) => {
+    const lines = [];
+    let firstLine = true;
+
+    process.stdout.write(prompt);
+
+    // Resume stdin in case it was paused after previous input
+    process.stdin.resume();
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: process.stdin.isTTY,
+    });
+
+    rl.on("line", (line) => {
+      if (!firstLine) process.stdout.write("... ");
+      firstLine = false;
+      lines.push(line);
+    });
+
+    rl.once("close", () => {
+      // Pause stdin between prompts so it doesn't consume input prematurely
+      process.stdin.pause();
+      resolve(lines.join("\n"));
+    });
+  });
+}
+
 // ─── Main interactive loop ───
 async function main() {
-  const history = []; // in-memory only, no persistence
+  const history = [];
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
+  process.on("SIGINT", () => {
+    console.log("\nbye.");
+    process.exit(0);
   });
-
-  const ask = (prompt) => new Promise((resolve) => rl.question(prompt, resolve));
 
   console.log(`
 ╔══════════════════════════════════════════════╗
@@ -155,6 +201,8 @@ async function main() {
 ║  Mention any file path to load it inline:    ║
 ║    e.g. "review ./src/index.js"              ║
 ║    e.g. "what does ../config.yaml do?"       ║
+║                                              ║
+║  Multiline input: Ctrl+D to send             ║
 ║                                              ║
 ║  Commands:                                   ║
 ║  /code <filename>  Save last reply's code    ║
@@ -167,7 +215,7 @@ async function main() {
   let lastReply = null;
 
   while (true) {
-    const input = await ask("you > ");
+    const input = await readMultilineInput("you > ");
     const trimmed = input.trim();
     if (!trimmed) continue;
 
@@ -207,21 +255,46 @@ async function main() {
       }
 
       if (filename) {
-        // Save all blocks concatenated into one file
-        const combined = blocks.map((b) => b.code).join("\n\n");
-        const saved = saveCodeFile(filename, combined);
-        console.log(`\n  ✓ Saved to ${saved}\n`);
+        const originalPath = path.resolve(process.cwd(), filename);
+        const hasOriginal = fs.existsSync(originalPath);
+
+        if (hasOriginal) {
+          const originalContent = fs.readFileSync(originalPath, "utf-8");
+          const suggestedChanges = blocks.map((b) => b.code).join("\n\n");
+
+          console.log("  [merging changes with original file via Claude...]\n");
+
+          const mergeMessages = [
+            {
+              role: "user",
+              content: `Here is the original file (${filename}):\n\`\`\`\n${originalContent}\n\`\`\`\n\nHere are the suggested changes:\n\`\`\`\n${suggestedChanges}\n\`\`\`\n\nReturn the complete updated file with the changes applied. Reply with ONLY the full file content inside a single code block, no explanation.`,
+            },
+          ];
+
+          const merged = await chat(mergeMessages);
+          const mergedBlocks = extractCodeBlocks(merged);
+          const finalContent = mergedBlocks.length > 0 ? mergedBlocks[0].code : merged;
+          const filePath = path.resolve(process.cwd(), filename);
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(filePath, finalContent);
+          console.log(`  ✓ Saved merged file to ${filePath}\n`);
+        } else {
+          const combined = blocks.map((b) => b.code).join("\n\n");
+          const saved = saveCodeFile(filename, combined);
+          console.log(`  ✓ Saved to ${saved}\n`);
+        }
       } else {
-        // Auto-name each block by language
+        // No filename — auto-save each block by language
+        const langToExt = {
+          javascript: "js", js: "js",
+          typescript: "ts", ts: "ts",
+          python: "py", py: "py",
+          bash: "sh", sh: "sh",
+          html: "html", css: "css",
+          json: "json",
+        };
         blocks.forEach((b, i) => {
-          const ext = b.lang === "javascript" || b.lang === "js" ? "js"
-                    : b.lang === "typescript" || b.lang === "ts" ? "ts"
-                    : b.lang === "python" || b.lang === "py" ? "py"
-                    : b.lang === "html" ? "html"
-                    : b.lang === "css" ? "css"
-                    : b.lang === "json" ? "json"
-                    : b.lang === "bash" || b.lang === "sh" ? "sh"
-                    : b.lang || "txt";
+          const ext = langToExt[b.lang] ?? b.lang ?? "txt";
           const name = `snippet-${Date.now()}-${i + 1}.${ext}`;
           const saved = saveCodeFile(name, b.code);
           console.log(`  ✓ ${saved}`);
@@ -238,8 +311,11 @@ async function main() {
     }
     history.push({ role: "user", content: enriched });
 
-    // Keep last 40 messages to stay sane
-    while (history.length > 40) history.shift();
+    // Keep last 40 messages — always trim in pairs to preserve user/assistant order
+    while (history.length > 40) {
+      history.shift();
+      if (history[0]?.role === "assistant") history.shift();
+    }
 
     process.stdout.write("assistant > ");
     const reply = await chat(history);
@@ -251,8 +327,6 @@ async function main() {
     appendChatLog("You", trimmed);
     appendChatLog("Assistant", reply);
   }
-
-  rl.close();
 }
 
 main().catch(console.error);
