@@ -1,0 +1,101 @@
+# HouseMind — Project Report
+# Updated: 2026-04-09
+# Source: Meeting logs 2026-04-05, 2026-04-06 + department reports
+
+---
+
+## DECISIONS MADE (do not re-open)
+
+- Flask prototype (figmaTem) annotation system is being MERGED into Next.js — Option A chosen
+- Mobile-first from Day 1 — no desktop-first shortcut
+- Phased feature rollout — no public roadmap promises, internal 6-month plan only
+- Supplier relationships are FREE during beta — no commercial terms
+- Batch sync for supplier catalog updates (not real-time) for MVP
+- Scraping is best-effort — always implement graceful fallback to manual image URL input
+
+---
+
+## MVP SCOPE (Phase 1, 6-8 weeks)
+
+IN:
+- Image carousel with reference images
+- Emoji annotation system (long-press 500ms → 8 emoji types → pin at x,y%)
+- Product linking (tap pin → paste URL → scrape images → pick one → linked)
+- Product panel filtered by active pins, grouped by emoji type
+- Hierarchical projects (main → subprojects, 2 levels max)
+- Role-based access: Architect / Contractor / Homeowner / Supplier
+- Role-colored comments
+- Curated reference catalog (~100-150 products)
+- Categories: tiles/flooring, fixtures/hardware, lighting, cladding
+
+OUT (Phase 2+):
+- Pricing feeds
+- Revit integration
+- Supplier dashboard
+- Automated scraping pipelines
+- Real-time catalog sync
+- Granular permissions
+- Unlimited project nesting
+- Custom emoji types
+
+---
+
+## CURRENT PRIORITIES BY DEPARTMENT
+
+### Tech
+- Critical path: image carousel → emoji annotation → product linking → product panel
+- Contract-first: Backend publishes API spec before Frontend builds anything
+- QA baseline devices: Samsung A series (A14/A24/A54) and iPhone SE
+- Performance targets: page load <3s on 3G, API p95 <500ms
+- Known risk: long-press gesture conflicts with native mobile browser — test in Week 1
+
+### Operations
+- Deliver to Tech by Week 4: catalog Google Sheet (category, name, image_url, supplier_name, supplier_url)
+- Deliver to Tech by Week 4: beta user list, Thai translation strings, 2-3 test project briefs
+- Catalog labeling rule: "Reference" by default, "Available" only after supplier confirms
+- Supplier onboarding: free beta, 2-min video tutorial, simple value prop
+- Bug SLAs with Tech: P0 → 24hr triage, P1 → 72hr
+
+### Marketing
+- 90-day targets: 50 architects onboarded, 70% activation, viral coefficient >1.0
+- Launch hook: "Pin your inspiration, link the perfect product, bring your vision to life — right from your phone."
+- Channel priority: direct invite → LINE/WhatsApp communities → ASA → events → paid (Phase 2)
+- Marketing owns: Awareness → Signup → first 24hr nudge
+- Operations owns: Day 14+ onboarding and retention
+- Deliver to Tech by Day 3: analytics tracking events spec (10 events)
+- Deliver to Tech by Week 1: branding assets (logo SVG, hex, typography)
+
+---
+
+## OPEN QUESTIONS (needs PM answer)
+
+| Question | Deadline |
+|----------|----------|
+| What happens when scraping fails — error only, or allow manual image upload too? | Week 2 |
+| Maximum images per project and file size limit? | Week 1 |
+| Can users delete their own pins, or only the creator? | Week 3 |
+| Invite link expiration period? | Week 1 |
+| Email notifications for comments — MVP or skip? | Week 4 |
+| Marketing budget approved at ฿430,000/month? | Week 1 |
+| Brand guidelines exist already or Marketing creates from scratch? | Day 1 |
+| Hard launch date or milestone trigger for public launch? | Week 2 |
+
+---
+
+## CROSS-DEPARTMENT DEPENDENCIES
+
+| From | To | What | When |
+|------|----|------|------|
+| Tech | Operations | Admin panel: invite CRUD | Week 2 |
+| Tech | Operations | Admin panel: product CRUD | Week 3 |
+| Tech | Operations | "Request availability" click dashboard | Week 3 |
+| Tech | Marketing | UTM parameter capture on signup | Week 2 |
+| Tech | Marketing | Referral tracking system | Week 6 |
+| Operations | Tech | Curated catalog Google Sheet | Week 4 |
+| Operations | Tech | Beta user list + Thai strings | Week 4 |
+| Operations | Marketing | Weekly user feedback synthesis | Ongoing |
+| Operations | Marketing | Beta users open to case studies | Week 4+ |
+| Marketing | Tech | Analytics tracking events spec | Day 3 |
+| Marketing | Tech | Branding assets | Week 1 |
+| Marketing | Operations | Welcome email template (TH + EN) | Week 2 |
+| Marketing | Operations | Supplier outreach template review | Week 2 |
