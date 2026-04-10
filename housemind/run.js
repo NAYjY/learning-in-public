@@ -75,6 +75,17 @@ function buildAllSystemPrompts() {
   }
 }
 
+function getSystemPrompt() {
+  let agentsPromt = ``;
+  for (const agentKey of Object.keys(agents)) {
+    agentsPromt = sanitizeForCache(
+      `${agentsPromt}\n\n${agents[agentKey].system}\n\n`
+    );
+  }
+  return `${buildMeetingRulesBlock()}\n${agentsPromt}\n\n`;
+}
+
+
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
 const DRY_RUN_ONLY = args.includes("--dry-run");
@@ -186,7 +197,7 @@ async function estimateTokens(systemPrompt, messages) {
   });
   return response.input_tokens;
 }
-
+const fixpromt= getSystemPrompt();
 async function chat(agentKey, history) {
   const agent = agents[agentKey];
   if (!agent) {
@@ -194,7 +205,8 @@ async function chat(agentKey, history) {
     return "[error — unknown agent]";
   }
 
-  const systemPrompt = agentSystemPrompts[agentKey];
+  // const systemPrompt = agentSystemPrompts[agentKey];
+  const systemPrompt = fixpromt;
   const consistency = checkPromptConsistency(agentKey, systemPrompt);
   if (!consistency.consistent) {
     console.warn(consistency.message);
@@ -290,7 +302,7 @@ async function runMeeting(topic) {
   // const opening = context
   //   ? `## BRIEFING — READ BEFORE SPEAKING:\n${context}\n\n---\n\nWe need to discuss: ${topic}. Marketing, what's your take?`
   //   : `We need to discuss: ${topic}. Marketing, what's your take?`;
-    const opening = `We need to discuss: ${topic}. Marketing, what's your take?`;
+    const opening = `We need to discuss: ${topic}.`;
 
   history.push({ role: "user", content: opening });
 
@@ -303,6 +315,8 @@ async function runMeeting(topic) {
     for (const role of ["marketing", "operations", "tech"]) {
       if (earlyStop) break;
 
+      history.push({ role: "user", content: ` ${role.charAt(0).toUpperCase() + role.slice(1)}, what's your take?` });
+
       const reply = await chat(role, history);
       formatMessage(agents[role].name, reply);
 
@@ -312,7 +326,7 @@ async function runMeeting(topic) {
         role: "assistant",
         content: `[${agents[role].name}]: ${reply}`,
       });
-      history.push({ role: "user", content: "Continue the discussion." });
+      
     }
   }
 
@@ -325,6 +339,7 @@ async function runMeeting(topic) {
   if (!earlyStop) {
     console.log("\n--- PM steps in ---");
     log(`## PM Summary\n`);
+    history.push({ role: "user", content: ` Manager, Now provide meeting summary.` });
     const pmReply = await chat("manager", history);
     formatMessage(agents.manager.name, pmReply);
   }

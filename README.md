@@ -89,3 +89,7 @@ base_context have to be solid\
 we have team rprt from team. should we stilll have report from head dep?\
 we should just have summery report redaedy to be next promt just input dicision on it\
 but it would lack in detail\
+
+Now cache control. i found it.\
+With each agent cache seperate down cost 30%\
+With combine agent then call it by name in prompt cache down cost 46%\
