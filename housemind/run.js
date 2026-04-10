@@ -5,6 +5,7 @@ import * as path from "path";
 import * as readline from "readline";
 import { fileURLToPath } from "url";
 import { meetingAgents as agents } from "./agents.js";
+import { checkCacheHealth, checkPromptConsistency, sanitizeForCache } from "./cacheHealth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -15,9 +16,9 @@ const client = new Anthropic({ apiKey });
 const MODEL = "claude-sonnet-4-5";
 const COST_PER_1K_INPUT = 0.003;
 const COST_PER_1K_OUTPUT = 0.015;
-
+const OUTPUT_LIMIT = 400;
 // ─── TOKEN BUDGET ─────────────────────────────────────────────────────────────
-const MAX_TOKENS_PER_MEETING = 15000;
+const MAX_TOKENS_PER_MEETING = 6480000;//15000;
 const TOKEN_WARNING_THRESHOLD = 0.8; // 80%
 
 // Per-agent tracking
@@ -46,19 +47,32 @@ const MEETING_RULES = {
 function buildMeetingRulesBlock() {
   const format = MEETING_RULES.formatRules.map((r) => `- ${r}`).join("\n");
   const escalation = MEETING_RULES.escalationProtocol.map((r) => `- ${r}`).join("\n");
+  const context = loadContext();
 
-  return `
+  return sanitizeForCache(`
 ─── MEETING RULES ───────────────────────────────────────
 FORMAT:
 ${format}
 
 ESCALATION:
 ${escalation}
-─────────────────────────────────────────────────────────`;
+─────────────────────────────────────────────────────────
+## BRIEFING — READ BEFORE SPEAKING:\n${context}\n\n---
+─────────────────────────────────────────────────────────`);
+
 }
 
 function injectMeetingRules(systemPrompt) {
   return `${systemPrompt}\n\n${buildMeetingRulesBlock()}`;
+}
+const agentSystemPrompts = {};
+
+function buildAllSystemPrompts() {
+  for (const agentKey of Object.keys(agents)) {
+    agentSystemPrompts[agentKey] = sanitizeForCache(
+      `${injectMeetingRules(agents[agentKey].system).trimEnd()}\n\n`
+    );
+  }
 }
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -91,12 +105,12 @@ function loadContext() {
     const reportPath = path.join(deptDir, dept, "report.md");
     if (fs.existsSync(reportPath)) {
       const content = fs.readFileSync(reportPath, "utf-8");
-      parts.push(`## ${dept.toUpperCase()} REPORT:\n${content.slice(0, 2000)}`);
+      parts.push(sanitizeForCache(`## ${dept.toUpperCase()} REPORT:\n${content.slice(0, 2000)}`));
     }
     const teamReportPath = path.join(deptDir, dept, "team-report.md");
     if (fs.existsSync(teamReportPath)) {
       const content = fs.readFileSync(teamReportPath, "utf-8");
-      parts.push(`## ${dept.toUpperCase()} TEAM REPORT:\n${content.slice(0, 1500)}`);
+      parts.push(sanitizeForCache(`## ${dept.toUpperCase()} TEAM REPORT:\n${content.slice(0, 1500)}`));
     }
   }
 
@@ -110,11 +124,12 @@ function loadContext() {
       const lastLog = files[files.length - 1];
       const logPath = path.join(logsDir, lastLog);
       const logContent = fs.readFileSync(logPath, "utf-8");
-      parts.push(`## LAST MEETING LOG (${lastLog}):\n${logContent.slice(-3000)}`);
+      // parts.push(`## LAST MEETING LOG (${lastLog}):\n${logContent.slice(-3000)}`);
+      parts.push(sanitizeForCache(`## LAST MEETING LOG:\n${logContent.slice(-3000)}`));
     }
   }
 
-  return parts.join("\n\n---\n\n");
+  return sanitizeForCache(parts.join("\n\n---\n\n")); 
 }
 
 // ─── TOKEN BUDGET HELPERS ─────────────────────────────────────────────────────
@@ -179,7 +194,11 @@ async function chat(agentKey, history) {
     return "[error — unknown agent]";
   }
 
-  const systemPrompt = injectMeetingRules(agent.system);
+  const systemPrompt = agentSystemPrompts[agentKey];
+  const consistency = checkPromptConsistency(agentKey, systemPrompt);
+  if (!consistency.consistent) {
+    console.warn(consistency.message);
+  }
   const inputEstimate = await estimateTokens(systemPrompt, history);
 
   // Check budget before calling
@@ -201,7 +220,7 @@ async function chat(agentKey, history) {
       `  └ ~${inputEstimate} input tokens | budget: ${getBudgetUsed()}/${MAX_TOKENS_PER_MEETING}\n`
     );
 
-    recordTokens(agentKey, inputEstimate, 0);
+    recordTokens(agentKey, inputEstimate, OUTPUT_LIMIT);
     return "[dry-run — skipped]";
   }
 
@@ -213,9 +232,21 @@ async function chat(agentKey, history) {
     try {
       const response = await client.messages.create({
         model: MODEL,
-        max_tokens: 400,
-        system: systemPrompt,
+        max_tokens: OUTPUT_LIMIT,
+        // system: systemPrompt,
+        system: [
+        {
+          type: "text",
+          text: systemPrompt,
+          cache_control: { type: "ephemeral" }
+        }
+      ],
         messages: history,
+      });
+
+      console.log({
+      cache_created: response.usage.cache_creation_input_tokens ?? 0,
+      cache_read:    response.usage.cache_read_input_tokens ?? 0,
       });
 
       const outputTokens = response.usage?.output_tokens ?? 0;
@@ -244,7 +275,7 @@ function formatMessage(speaker, text) {
 
 async function runMeeting(topic) {
   const history = [];
-  const context = loadContext();
+  // const context = loadContext();
 
   console.log("\n--- Meeting started ---");
   console.log(`Topic: ${topic}`);
@@ -256,9 +287,10 @@ async function runMeeting(topic) {
   log(`**Topic:** ${topic}\n`);
   log(`---\n`);
 
-  const opening = context
-    ? `## BRIEFING — READ BEFORE SPEAKING:\n${context}\n\n---\n\nWe need to discuss: ${topic}. Marketing, what's your take?`
-    : `We need to discuss: ${topic}. Marketing, what's your take?`;
+  // const opening = context
+  //   ? `## BRIEFING — READ BEFORE SPEAKING:\n${context}\n\n---\n\nWe need to discuss: ${topic}. Marketing, what's your take?`
+  //   : `We need to discuss: ${topic}. Marketing, what's your take?`;
+    const opening = `We need to discuss: ${topic}. Marketing, what's your take?`;
 
   history.push({ role: "user", content: opening });
 
@@ -368,7 +400,8 @@ async function main() {
   const topic =
     filteredArgs[0] ||
     "What should we build first — supplier onboarding or the owner visualization tool?";
-
+    buildAllSystemPrompts();
+  await checkCacheHealth(agents, injectMeetingRules, client, MODEL);
   // Phase 1: dry-run estimate
   DRY_RUN = true;
   console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
