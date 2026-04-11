@@ -16,7 +16,7 @@ const client = new Anthropic({ apiKey });
 const MODEL = "claude-sonnet-4-5";
 const COST_PER_1K_INPUT = 0.003;
 const COST_PER_1K_OUTPUT = 0.015;
-const OUTPUT_LIMIT = 400;
+const OUTPUT_LIMIT = 150;
 // ─── TOKEN BUDGET ─────────────────────────────────────────────────────────────
 const MAX_TOKENS_PER_MEETING = 6480000;//15000;
 const TOKEN_WARNING_THRESHOLD = 0.8; // 80%
@@ -31,6 +31,7 @@ let earlyStop = false;
 // ─── MEETING RULES ────────────────────────────────────────────────────────────
 const MEETING_RULES = {
   formatRules: [
+    "Begin your response directly with your content — never prefix with your name or role.",
     "Keep responses under 5 sentences unless synthesizing.",
     "Lead with your position. Don't hedge.",
     "If you disagree, say why specifically.",
@@ -324,7 +325,7 @@ async function runMeeting(topic) {
 
       history.push({
         role: "assistant",
-        content: `[${agents[role].name}]: ${reply}`,
+        content: `${reply}`,
       });
       
     }

@@ -93,3 +93,6 @@ but it would lack in detail\
 Now cache control. i found it.\
 With each agent cache seperate down cost 30%\
 With combine agent then call it by name in prompt cache down cost 46%\
+context even better\
+With combine agent then call it by name in prompt and less token limit cache down cost 70%\
+and contect is much much better. sweet\
