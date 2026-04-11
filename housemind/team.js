@@ -3,10 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
-// ─── Import team config ───
-// expects: export const TEAMS = { tech: {...}, marketing: {...}, operations: {...} }
-// expects: export const BASE_CONTEXT = "..."
-import { TEAMS, BASE_CONTEXT } from "./subAgentCompact.js";
+import { TEAMS, BASE_CONTEXT } from "./subAgents.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -15,18 +12,44 @@ const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
 const client = new Anthropic({ apiKey });
 
 const MODEL = "claude-sonnet-4-5";
-const OUTPUT_LIMIT = 200;         // discussion responses — short and sharp
-const FACILITATOR_LIMIT = 400;   // facilitator needs more room for JSON + brief
+const OUTPUT_LIMIT = 200;
+const FACILITATOR_LIMIT = 1200;
+const HEAD_LIMIT = 400;
+const AGENT_REPORT_LIMIT = 350;
 const MAX_ROUNDS = 4;
 const COST_PER_1K_INPUT = 0.003;
 
 let totalInputTokens = 0;
 let totalOutputTokens = 0;
+let logPath = null;
 
 // ─── Logging ───
-let logPath = null;
 function log(text) {
   if (logPath) fs.appendFileSync(logPath, text + "\n");
+}
+
+// ─── Auto-read context files ───
+function readIfExists(filePath) {
+  if (fs.existsSync(filePath)) {
+    const content = fs.readFileSync(filePath, "utf-8").trim();
+    return content.length > 0 ? content : null;
+  }
+  return null;
+}
+
+// Extract only PM Summary from board report — skip full debate transcript
+function extractBoardSummary(boardReport) {
+  if (!boardReport) return null;
+  const markers = [
+    /## PM Summary[\s\S]*$/i,
+    /## WHAT WE AGREED[\s\S]*$/i,
+    /# PM —[\s\S]*$/i,
+  ];
+  for (const marker of markers) {
+    const match = boardReport.match(marker);
+    if (match) return match[0].slice(0, 3000);
+  }
+  return boardReport.slice(-2000); // fallback: last 2000 chars
 }
 
 // ─── Rate limit pacer ───
@@ -55,10 +78,12 @@ async function chat(systemPrompt, messages, maxTokens = OUTPUT_LIMIT) {
         system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
         messages,
       });
-      const input = response.usage?.input_tokens ?? 0;
-      const output = response.usage?.output_tokens ?? 0;
-      totalInputTokens += input;
-      totalOutputTokens += output;
+      totalInputTokens += response.usage?.input_tokens ?? 0;
+      totalOutputTokens += response.usage?.output_tokens ?? 0;
+      console.log({
+      cache_created: response.usage.cache_creation_input_tokens ?? 0,
+      cache_read:    response.usage.cache_read_input_tokens ?? 0,
+      });
       return response.content[0].text;
     } catch (err) {
       if (err.status === 429 && attempt < 4) {
@@ -73,41 +98,67 @@ async function chat(systemPrompt, messages, maxTokens = OUTPUT_LIMIT) {
   }
 }
 
-// ─── Built-in Facilitator system prompt ───
-function getFacilitatorSystem() {
-  return `You are the Meeting Facilitator for ${BASE_CONTEXT}
+// ─── Safe JSON parse ───
+function parseJSON(text, fallback) {
+  try {
+    return JSON.parse(text.replace(/```json|```/g, "").trim());
+  } catch {
+    console.warn("  ⚠️  Facilitator returned invalid JSON — keeping previous state");
+    return fallback;
+  }
+}
 
-You have three jobs. Read which job you are given and execute only that one.
+// ─── Facilitator system prompt ───
+function getFacilitatorSystem() {
+  return `You are the Meeting Facilitator for a team planning discussion.
+
+Company context:
+${BASE_CONTEXT}
+
+You have three jobs. Read which job you are given and execute ONLY that one.
+
+---
 
 ## JOB 1 — Build Initial Agenda
-Input: task description, no round responses yet.
-Output: initial state JSON with contested[] pre-populated from the task.
-No explanation. No markdown fences. Output ONLY valid JSON.
+Input: task + board context + optional previous team report.
+Output: initial state JSON.
+- Pre-populate agreed[] with anything already decided by the board
+- Pre-populate contested[] with key decisions this team must resolve
+- Set narrative to what this meeting must resolve
+- Pre-populate build_tasks with agent names as empty shells
+Output ONLY valid JSON. No explanation. No markdown fences.
+
+---
 
 ## JOB 2 — Update State After Round
-Input: current state JSON + round responses from agents.
-Output: updated state JSON. 
-Rules:
+Input: current state JSON + round responses.
+Output: updated state JSON.
 - Move contested → agreed only when agents explicitly agree
 - Add new contested items that emerged
 - Update positions under each contested item
-- Add blockers with who waits on whom
+- Add blockers with who waits on whom and urgency
 - Add risks with owner + mitigation
-- Update key_moments with 1-2 sentences about what shifted this round
-- Update narrative (max 3 sentences — the spirit of the debate so far)
-No explanation. No markdown fences. Output ONLY valid JSON.
+- Append to key_moments: 1 sentence about what shifted this round
+- Update narrative: max 3 sentences
+- Update build_tasks as assignments become clear
+Output ONLY valid JSON. No explanation. No markdown fences.
+
+---
 
 ## JOB 3 — Write Agent Brief
-Input: current state JSON + which agent to brief.
-Output: readable plain-text brief for that agent. Format:
+Input: current state JSON + agent name.
+Output: readable plain-text brief. Format exactly:
 
-## What we've agreed
-[list]
+## What the board decided
+[relevant board decisions for this agent]
+
+## What we've agreed in this meeting
+[list or "nothing yet"]
 
 ## Still being debated
-[topic — positions so far]
+[topic: positions so far, or "nothing yet"]
 
-## You are blocked on
+## Your blockers
 [only blockers relevant to this agent, or "none"]
 
 ## Risks on your plate
@@ -115,6 +166,8 @@ Output: readable plain-text brief for that agent. Format:
 
 ## Context
 [narrative]
+
+---
 
 ## State Schema — always maintain this exact structure:
 {
@@ -134,11 +187,19 @@ Output: readable plain-text brief for that agent. Format:
   ],
   "key_moments": ["string"],
   "narrative": "string",
-  "open_questions": ["string"]
+  "open_questions": ["string"],
+  "build_tasks": {
+    "AgentName": {
+      "owns": ["string"],
+      "needs_from": { "OtherAgent": "what and when" },
+      "delivers_to": { "OtherAgent": "what and when" },
+      "effort": "string"
+    }
+  }
 }`;
 }
 
-// ─── Agent system prompt wrapper ───
+// ─── Agent system prompt ───
 function getAgentSystem(agent) {
   return `${agent.system}
 
@@ -156,86 +217,99 @@ ${BASE_CONTEXT}
 - Flag founder decisions with [FOUNDER DECISION REQUIRED]`;
 }
 
-// ─── Facilitator: build initial agenda ───
-async function facilitatorInitial(task) {
-  const messages = [{
-    role: "user",
-    content: `JOB 1 — Build Initial Agenda\n\nTask: ${task}\n\nBuild the initial debate state JSON based on this task and company context. Pre-populate contested[] with the key technical/operational decisions this task requires.`,
-  }];
-  const reply = await chat(getFacilitatorSystem(), messages, FACILITATOR_LIMIT);
-  return parseJSON(reply, { agreed: [], contested: [], commitments: {}, blocked: [], risks: [], key_moments: [], narrative: "", open_questions: [] });
+// ─── Facilitator calls ───
+async function facilitatorInitial(task, boardSummary, previousReport) {
+  const parts = [`JOB 1 — Build Initial Agenda\n\nTask: ${task}`];
+  if (boardSummary) parts.push(`\n## Board Decisions:\n${boardSummary}`);
+  if (previousReport) parts.push(`\n## Previous Team Report:\n${previousReport.slice(0, 2000)}`);
+  parts.push(`\nBuild the initial debate state JSON.`);
+
+  const reply = await chat(
+    getFacilitatorSystem(),
+    [{ role: "user", content: parts.join("\n") }],
+    FACILITATOR_LIMIT
+  );
+  return parseJSON(reply, {
+    agreed: [], contested: [], commitments: {}, blocked: [],
+    risks: [], key_moments: [], narrative: "", open_questions: [], build_tasks: {}
+  });
 }
 
-// ─── Facilitator: update state after round ───
 async function facilitatorUpdate(state, roundReplies) {
-  const messages = [{
-    role: "user",
-    content: `JOB 2 — Update State After Round\n\nCurrent state:\n${JSON.stringify(state, null, 2)}\n\nRound responses:\n${roundReplies.map(r => `[${r.name}]: ${r.reply}`).join("\n\n")}\n\nUpdate the state JSON.`,
-  }];
-  const reply = await chat(getFacilitatorSystem(), messages, FACILITATOR_LIMIT);
+  const content = `JOB 2 — Update State After Round\n\nCurrent state:\n${JSON.stringify(state, null, 2)}\n\nRound responses:\n${roundReplies.map(r => `[${r.name}]: ${r.reply}`).join("\n\n")}\n\nUpdate the state JSON.`;
+  const reply = await chat(getFacilitatorSystem(), [{ role: "user", content }], FACILITATOR_LIMIT);
   return parseJSON(reply, state);
 }
 
-// ─── Facilitator: write agent brief ───
 async function facilitatorBrief(state, agentName) {
-  const messages = [{
-    role: "user",
-    content: `JOB 3 — Write Agent Brief\n\nAgent to brief: ${agentName}\n\nCurrent state:\n${JSON.stringify(state, null, 2)}\n\nWrite a readable brief for this agent only.`,
-  }];
-  return await chat(getFacilitatorSystem(), messages, FACILITATOR_LIMIT);
+  const content = `JOB 3 — Write Agent Brief\n\nAgent: ${agentName}\n\nCurrent state:\n${JSON.stringify(state, null, 2)}`;
+  return await chat(getFacilitatorSystem(), [{ role: "user", content }], FACILITATOR_LIMIT);
 }
 
-// ─── Safe JSON parse ───
-function parseJSON(text, fallback) {
-  try {
-    const clean = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(clean);
-  } catch {
-    console.warn("  ⚠️  Facilitator returned invalid JSON — keeping previous state");
-    return fallback;
-  }
+async function facilitatorAllBriefs(state, agentNames) {
+  const content = `JOB 3 — Write briefs for ALL agents.
+  
+Agents: ${agentNames.join(", ")}
+
+Current state:
+${JSON.stringify(state, null, 2)}
+
+Write one brief per agent separated by:
+=== AgentName ===
+`;
+  return await chat(getFacilitatorSystem(), [{ role: "user", content }], FACILITATOR_LIMIT);
 }
 
 // ─── Round 0: self-selection ───
-async function runSelfSelection(team, task) {
+async function runSelfSelection(team, task, boardSummary) {
   console.log("\n--- Round 0: Self-selection ---");
   log(`## Round 0 — Self Selection\n`);
 
   const relevant = [];
+  const context = boardSummary ? `\n\nBoard context:\n${boardSummary}` : "";
 
   for (const [agentKey, agent] of Object.entries(team.agents)) {
-    const messages = [{
+    const reply = await chat(getAgentSystem(agent), [{
       role: "user",
-      content: `Task under discussion: "${task}"\n\nIs this task relevant to your role? Answer in 1-2 sentences. If yes, briefly state your primary concern or contribution. If not relevant, say "Not applicable."`,
-    }];
+      content: `Task: "${task}"${context}\n\nIs this task relevant to your role? 1-2 sentences. If yes, state your primary concern. If not relevant, say exactly: "Not applicable."`,
+    }], 80);
 
-    const reply = await chat(getAgentSystem(agent), messages, 80);
     console.log(`  [${agent.name}]: ${reply}`);
     log(`### ${agent.name}\n\n${reply}\n`);
 
-    const notApplicable = reply.toLowerCase().includes("not applicable");
-    if (!notApplicable) {
+    if (!reply.toLowerCase().includes("not applicable")) {
       relevant.push({ key: agentKey, agent });
-      console.log(`  ✓ ${agent.name} joins discussion`);
+      console.log(`  ✓ joins`);
     } else {
-      console.log(`  — ${agent.name} sits out`);
+      console.log(`  — sits out`);
     }
   }
 
-  console.log(`\n  Relevant agents: ${relevant.map(r => r.agent.name).join(", ")}\n`);
-  log(`\n**Relevant agents:** ${relevant.map(r => r.agent.name).join(", ")}\n\n---\n`);
+  console.log(`\n  In discussion: ${relevant.map(r => r.agent.name).join(", ")}\n`);
+  log(`\n**In discussion:** ${relevant.map(r => r.agent.name).join(", ")}\n\n---\n`);
   return relevant;
 }
 
-// ─── Main meeting runner ───
-async function runTeamMeeting(teamKey, task) {
+// ─── Main ───
+async function runTeamMeeting(teamKey) {
   const team = TEAMS[teamKey];
   if (!team) {
     console.error(`Unknown team: "${teamKey}". Available: ${Object.keys(TEAMS).join(", ")}`);
     process.exit(1);
   }
 
-  // ── Setup output directory ──
+  // ── Auto-read all context — no prompting ──
+  const boardReport    = readIfExists(path.join(__dirname, "board-report.md"));
+  const boardSummary   = extractBoardSummary(boardReport);
+  const previousReport = readIfExists(path.join(__dirname, "departments", teamKey, "team-report.md"));
+  const codebaseCtx    = readIfExists(path.join(__dirname, "departments", teamKey, "codebase-context.md"));
+
+  // Task extracted from board summary or fallback
+  const task = boardSummary
+    ? `Plan your team's work based on the board decisions above.`
+    : `Plan your team's next sprint.`;
+
+  // ── Setup output ──
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const outDir = path.join(__dirname, "departments", teamKey, "meetings");
   fs.mkdirSync(outDir, { recursive: true });
@@ -243,123 +317,163 @@ async function runTeamMeeting(teamKey, task) {
 
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  📋 ${team.head.name} — Team Discussion`);
-  console.log(`  Task: ${task}`);
-  console.log(`  Team: ${teamKey}`);
+  console.log(`  Team     : ${teamKey}`);
+  console.log(`  Board    : ${boardSummary   ? "✓ loaded" : "✗ not found"}`);
+  console.log(`  Previous : ${previousReport ? "✓ loaded" : "✗ none"}`);
+  console.log(`  Codebase : ${codebaseCtx    ? "✓ loaded" : "✗ none"}`);
   console.log(`${"=".repeat(60)}\n`);
 
   log(`# Team Meeting — ${team.head.name}`);
   log(`\n**Date:** ${new Date().toISOString()}`);
-  log(`\n**Team:** ${teamKey}`);
-  log(`\n**Task:** ${task}\n\n---\n`);
+  log(`\n**Team:** ${teamKey}\n`);
+  if (boardSummary) log(`\n## Board Context\n\n${boardSummary}\n\n---\n`);
 
   // ── Head opens ──
   console.log("[HEAD] Opening meeting...\n");
-  const headOpening = await chat(getAgentSystem(team.head), [{
-    role: "user",
-    content: `Open the team discussion for this task: "${task}"\n\nBriefly frame what needs to be decided. What are the key architectural or operational questions the team must resolve before anyone builds anything?`,
-  }], 250);
+  const headOpenParts = [
+    `You are opening a team planning meeting.`,
+    boardSummary  ? `\n## What the board decided:\n${boardSummary}` : "",
+    codebaseCtx   ? `\n## Current codebase:\n${codebaseCtx}` : "",
+    previousReport? `\n## What we planned before:\n${previousReport.slice(0, 1500)}` : "",
+    `\nFrame what your team needs to plan and decide. What key questions must be resolved before anyone builds anything?`,
+  ].filter(Boolean).join("\n");
 
-  console.log(`[${team.head.name}]: ${headOpening}\n`);
+  const headOpening = await chat(
+    getAgentSystem(team.head),
+    [{ role: "user", content: headOpenParts }],
+    HEAD_LIMIT
+  );
+  console.log(`[${team.head.name}]:\n${headOpening}\n`);
   log(`## Head Opening\n\n${headOpening}\n\n---\n`);
 
-  // ── Facilitator builds initial agenda ──
+  // ── Facilitator: initial agenda ──
   console.log("[FACILITATOR] Building initial agenda...\n");
-  let state = await facilitatorInitial(task);
+  let state = await facilitatorInitial(task, boardSummary, previousReport);
   log(`## Initial Agenda State\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n---\n`);
 
   // ── Round 0: self-selection ──
-  const relevantAgents = await runSelfSelection(team, task);
-
+  const relevantAgents = await runSelfSelection(team, task, boardSummary);
   if (relevantAgents.length === 0) {
-    console.log("No agents selected as relevant. Ending meeting.");
+    console.log("No agents relevant. Ending meeting.");
     return;
   }
 
-  // ── Debate rounds ──
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    console.log(`\n--- Round ${round} ---`);
-    log(`## Round ${round}\n`);
+  // // ── Debate rounds ──
+  // for (let round = 1; round <= MAX_ROUNDS; round++) {
+  //   console.log(`\n--- Round ${round} ---`);
+  //   log(`## Round ${round}\n`);
 
-    const roundReplies = [];
+  //   const roundReplies = [];
 
-    for (const { agent } of relevantAgents) {
-      // Facilitator writes a brief for this agent
-      const brief = await facilitatorBrief(state, agent.name);
+  //   for (const { agent } of relevantAgents) {
+  //     const brief = await facilitatorBrief(state, agent.name);
+  //     const reply = await chat(getAgentSystem(agent), [{
+  //       role: "user",
+  //       content: `${brief}\n\nGive your position for this round.`,
+  //     }]);
 
-      const messages = [{
-        role: "user",
-        content: `${brief}\n\nTask: ${task}\n\nGive your position for this round.`,
-      }];
+  //     console.log(`\n[${agent.name}]:\n${reply}`);
+  //     log(`### ${agent.name}\n\n${reply}\n`);
+  //     roundReplies.push({ name: agent.name, reply });
+  //   }
 
-      const reply = await chat(getAgentSystem(agent), messages);
-      console.log(`\n[${agent.name}]:\n${reply}`);
-      log(`### ${agent.name}\n\n${reply}\n`);
+  //   console.log("\n[FACILITATOR] Updating state...");
+  //   state = await facilitatorUpdate(state, roundReplies);
+  //   log(`\n**State after round ${round}:**\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n---\n`);
 
-      roundReplies.push({ name: agent.name, reply });
-    }
+  //   if (state.contested.length === 0 && state.blocked.length === 0) {
+  //     console.log("\n✅ All items resolved — ending early.");
+  //     log(`\n> ✅ Resolved after round ${round}.\n`);
+  //     break;
+  //   }
+  // }
+// ── Debate rounds ──
+for (let round = 1; round <= MAX_ROUNDS; round++) {
+  console.log(`\n--- Round ${round} ---`);
+  log(`## Round ${round}\n`);
 
-    // Facilitator updates state
-    console.log("\n[FACILITATOR] Updating state...");
-    state = await facilitatorUpdate(state, roundReplies);
-    log(`\n**State after round ${round}:**\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n---\n`);
+  // ✅ One call for all briefs at once
+  console.log("[FACILITATOR] Writing briefs...");
+  const agentNames = relevantAgents.map(r => r.agent.name);
+  const allBriefs = await facilitatorAllBriefs(state, agentNames);
 
-    // Early exit if nothing contested and no blockers
-    if (state.contested.length === 0 && state.blocked.length === 0) {
-      console.log("\n✅ All items resolved — ending debate early.");
-      log(`\n> ✅ All items resolved after round ${round}.\n`);
-      break;
-    }
+  const roundReplies = [];
+
+  for (const { agent } of relevantAgents) {
+    // Parse this agent's section from the bulk brief
+    const briefMatch = allBriefs.match(
+      new RegExp(`=== ${agent.name} ===([\\s\\S]*?)(?==== |$)`)
+    );
+    const brief = briefMatch ? briefMatch[1].trim() : allBriefs;
+
+    const reply = await chat(getAgentSystem(agent), [{
+      role: "user",
+      content: `${brief}\n\nGive your position for this round.`,
+    }]);
+
+    console.log(`\n[${agent.name}]:\n${reply}`);
+    log(`### ${agent.name}\n\n${reply}\n`);
+    roundReplies.push({ name: agent.name, reply });
   }
 
-  // ── Head locks final approach ──
+  console.log("\n[FACILITATOR] Updating state...");
+  state = await facilitatorUpdate(state, roundReplies);
+  log(`\n**State after round ${round}:**\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n---\n`);
+
+  if (state.contested.length === 0 && state.blocked.length === 0) {
+    console.log("\n✅ All items resolved — ending early.");
+    log(`\n> ✅ Resolved after round ${round}.\n`);
+    break;
+  }
+}
+  // ── Head locks approach ──
   console.log("\n[HEAD] Locking final approach...\n");
-  const lockMessages = [{
+  const lockedApproach = await chat(getAgentSystem(team.head), [{
     role: "user",
-    content: `Task: ${task}\n\nFinal debate state:\n${JSON.stringify(state, null, 2)}\n\nLock the final approach. Resolve any remaining contested items. Be decisive. What does each agent build, in what order, with what dependencies?`,
-  }];
-  const lockedApproach = await chat(getAgentSystem(team.head), lockMessages, 400);
+    content: `Final debate state:\n${JSON.stringify(state, null, 2)}\n\nLock the final approach. Be decisive. State clearly what each agent builds, in what order, with what dependencies.`,
+  }], HEAD_LIMIT);
   console.log(`[${team.head.name}]:\n${lockedApproach}\n`);
   log(`## Head — Locked Approach\n\n${lockedApproach}\n\n---\n`);
 
   // ── Individual agent reports ──
-  console.log("\n--- Writing individual agent reports ---\n");
+  console.log("\n--- Individual agent reports ---\n");
   log(`## Individual Agent Reports\n`);
 
   const agentReports = {};
-
   for (const { key, agent } of relevantAgents) {
-    const messages = [{
+    const report = await chat(getAgentSystem(agent), [{
       role: "user",
-      content: `Task: ${task}\n\nFinal state:\n${JSON.stringify(state, null, 2)}\n\nLocked approach from Head:\n${lockedApproach}\n\nWrite YOUR individual work report. Include:\n1. What you own in this task\n2. Your specific deliverables\n3. Dependencies — what you need from others before you can start\n4. What others need from you, and when\n5. Risks or concerns you still have\n6. Your estimated effort`,
-    }];
+      content: `Final state:\n${JSON.stringify(state, null, 2)}\n\nLocked approach:\n${lockedApproach}\n\nWrite YOUR build report:\n1. What you own\n2. Specific deliverables (be concrete — filenames, endpoints, schemas)\n3. What you need from others before you start\n4. What others need from you and when\n5. Remaining risks\n6. Estimated effort`,
+    }], AGENT_REPORT_LIMIT);
 
-    const report = await chat(getAgentSystem(agent), messages, 350);
     agentReports[key] = report;
-    console.log(`[${agent.name}] report written`);
+    console.log(`  ✓ ${agent.name}`);
     log(`### ${agent.name}\n\n${report}\n`);
   }
 
-  // ── Team summary report ──
-  console.log("\n[HEAD] Writing team summary report...\n");
-
-  const allAgentReports = Object.entries(agentReports)
-    .map(([k, r]) => `## ${team.agents[k].name}\n${r}`)
+  // ── Team summary ──
+  console.log("\n[HEAD] Writing team summary...\n");
+  const allReports = Object.entries(agentReports)
+    .map(([k, r]) => `### ${team.agents[k].name}\n${r}`)
     .join("\n\n---\n\n");
 
-  const summaryMessages = [{
+  const teamSummary = await chat(getAgentSystem(team.head), [{
     role: "user",
-    content: `Task: ${task}\n\nFinal debate state:\n${JSON.stringify(state, null, 2)}\n\nLocked approach:\n${lockedApproach}\n\nIndividual agent reports:\n${allAgentReports}\n\nWrite the team summary report:\n1. What was decided (architecture, approach, scope)\n2. Who owns what (clear assignments)\n3. Dependency map (who waits on whom)\n4. Unresolved items or risks\n5. What the build session needs to know\n6. Handoff notes for other teams`,
-  }];
-
-  const teamSummary = await chat(getAgentSystem(team.head), summaryMessages, 500);
+    content: `Final state:\n${JSON.stringify(state, null, 2)}\n\nLocked approach:\n${lockedApproach}\n\nAgent reports:\n${allReports}\n\nWrite the team summary:\n1. Architecture/approach decisions made\n2. Who owns what (clear assignments)\n3. Build order — who goes first, what unblocks who\n4. Unresolved risks\n5. What the build session must know\n6. Handoff notes for other teams`,
+  }], HEAD_LIMIT);
   console.log(`[${team.head.name}]:\n${teamSummary}`);
+  log(`\n---\n\n## Team Summary\n\n${teamSummary}\n`);
 
-  // ── Save summary report ──
-  const summaryReport = `# Team Meeting Summary — ${team.head.name}
+  // ── Save team-report.md (read by build session) ──
+  const teamReport = `# Team Report — ${team.head.name}
 
 **Date:** ${new Date().toISOString()}
-**Task:** ${task}
 **Team:** ${teamKey}
+
+---
+
+## Board Context
+${boardSummary ?? "_No board report found_"}
 
 ---
 
@@ -377,7 +491,7 @@ ${lockedApproach}
 
 ## Individual Agent Reports
 
-${allAgentReports}
+${allReports}
 
 ---
 
@@ -385,56 +499,55 @@ ${allAgentReports}
 ${teamSummary}
 `;
 
-  const summaryPath = path.join(outDir, `summary-${timestamp}.md`);
-  fs.writeFileSync(summaryPath, summaryReport);
-
-  // Also write as latest for build session to read
   const latestPath = path.join(__dirname, "departments", teamKey, "team-report.md");
-  fs.writeFileSync(latestPath, summaryReport);
+  fs.writeFileSync(latestPath, teamReport);
 
-  log(`\n---\n\n## Team Summary\n\n${teamSummary}\n`);
-
-  // ── Cost summary ──
-  const inputCost = ((totalInputTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
+  // ── Cost ──
+  const cost = ((totalInputTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ✓ Meeting log    : departments/${teamKey}/meetings/meeting-${timestamp}.md`);
-  console.log(`  ✓ Summary report : departments/${teamKey}/meetings/summary-${timestamp}.md`);
-  console.log(`  ✓ Latest report  : departments/${teamKey}/team-report.md`);
+  console.log(`  ✓ Meeting log  : departments/${teamKey}/meetings/meeting-${timestamp}.md`);
+  console.log(`  ✓ Team report  : departments/${teamKey}/team-report.md  ← build session reads this`);
   console.log(`  ─`);
-  console.log(`  Input tokens  : ${totalInputTokens.toLocaleString()}`);
-  console.log(`  Output tokens : ${totalOutputTokens.toLocaleString()}`);
-  console.log(`  Est. cost     : ~$${inputCost}`);
+  console.log(`  Input  : ${totalInputTokens.toLocaleString()} tokens`);
+  console.log(`  Output : ${totalOutputTokens.toLocaleString()} tokens`);
+  console.log(`  Cost   : ~$${cost}`);
   console.log(`${"=".repeat(60)}\n`);
 }
 
 // ─── CLI ───
 const args = process.argv.slice(2);
 const teamArg = args[0];
-const taskArg = args.slice(1).join(" ");
 
-if (!teamArg || !taskArg) {
+if (!teamArg) {
   const available = Object.entries(TEAMS).map(([key, t]) => {
     const agents = Object.values(t.agents).map(a => a.name).join(", ");
-    return `  ${key.padEnd(14)}Head: ${t.head.name}\n                Agents: ${agents}`;
+    return `  ${key.padEnd(14)}Head: ${t.head.name}\n${" ".repeat(16)}Agents: ${agents}`;
   }).join("\n\n");
 
   console.log(`
 Usage:
-  node team.js <team> "<task>"
+  node team.js <team>
+
+No task argument needed — task is derived from board-report.md automatically.
 
 Teams:
-
 ${available}
 
-Examples:
-  node team.js tech "Design annotation workspace architecture"
-  node team.js marketing "Plan beta launch for first 5 architects"
-  node team.js operations "Define product curation workflow"
+Auto-read inputs (zero prompting):
+  board-report.md                              ← board decisions (PM summary extracted)
+  departments/<team>/team-report.md            ← previous plan (optional)
+  departments/<team>/codebase-context.md       ← codebase state (optional)
 
 Outputs:
-  departments/<team>/meetings/meeting-<ts>.md    ← full meeting log
-  departments/<team>/meetings/summary-<ts>.md   ← summary + agent reports
-  departments/<team>/team-report.md             ← latest (read by build session)
+  departments/<team>/meetings/meeting-<ts>.md  ← full debate log (archive)
+  departments/<team>/team-report.md            ← summary only, read by build session
+
+Full bash pipeline:
+  node board.js "Should we expand to new market?"   # board decides
+  node team.js tech                                  # tech plans
+  node team.js operations                            # ops plans
+  node team.js marketing                             # marketing plans
+  node build.js tech                                 # tech builds
 `);
   process.exit(0);
 }
@@ -444,4 +557,4 @@ if (!TEAMS[teamArg]) {
   process.exit(1);
 }
 
-runTeamMeeting(teamArg, taskArg).catch(console.error);
+runTeamMeeting(teamArg).catch(console.error);
