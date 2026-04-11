@@ -1,9 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 import * as fs from "fs";
 import * as path from "path";
-import * as readline from "readline";
-import { execSync } from "child_process";
 import { fileURLToPath } from "url";
+
+// ─── Import team config ───
+// expects: export const TEAMS = { tech: {...}, marketing: {...}, operations: {...} }
+// expects: export const BASE_CONTEXT = "..."
+import { TEAMS, BASE_CONTEXT } from "./subAgentCompact.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,133 +15,57 @@ const apiKey = fs.readFileSync(KEY_FILE, "utf-8").trim();
 const client = new Anthropic({ apiKey });
 
 const MODEL = "claude-sonnet-4-5";
+const OUTPUT_LIMIT = 200;         // discussion responses — short and sharp
+const FACILITATOR_LIMIT = 400;   // facilitator needs more room for JSON + brief
+const MAX_ROUNDS = 4;
 const COST_PER_1K_INPUT = 0.003;
-let totalTokens = 0;
-let DRY_RUN = false;
 
-const DEFAULT_MAX_TOKENS = 4096;
+let totalInputTokens = 0;
+let totalOutputTokens = 0;
 
-// ─── Git helpers (local only — no push) ───
-function gitExec(cmd, opts = {}) {
-  try {
-    const out = execSync(cmd, { encoding: "utf-8", ...opts }).trim();
-    return { ok: true, out };
-  } catch (e) {
-    return { ok: false, out: e.message };
-  }
-}
-
-function gitCommit(files, message) {
-  if (DRY_RUN) return; // never touch git during dry-run
-  for (const f of files) {
-    const r = gitExec(`git add "${f}"`);
-    if (!r.ok) console.warn(`  [git] warn: could not stage ${f}`);
-  }
-  const r = gitExec(`git commit -m "${message}"`);
-  if (r.ok) {
-    console.log(`  [git] ✓ ${message}`);
-  } else {
-    console.warn(`  [git] warn: commit failed — ${r.out}`);
-  }
-}
-
-// Returns the new branch name, or null on failure.
-function gitCreateBranch(teamKey, taskSlug, timestamp) {
-  const base = gitExec("git rev-parse --abbrev-ref HEAD");
-  if (!base.ok) {
-    console.error("  [git] ✗ Not a git repo or cannot read HEAD.");
-    return null;
-  }
-  const branch = `build/${teamKey}/${taskSlug}-${timestamp}`;
-  const r = gitExec(`git checkout -b "${branch}"`);
-  if (!r.ok) {
-    console.error(`  [git] ✗ Could not create branch: ${r.out}`);
-    return null;
-  }
-  console.log(`  [git] ✓ New branch: ${branch}  (base: ${base.out})`);
-  return branch;
-}
-
-// Slugify task string for use in a branch name
-function slugify(text, maxLen = 40) {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, maxLen);
-}
-
-// ─── Token estimation ───
-async function estimateTokens(systemPrompt, messages) {
-  const response = await client.messages.countTokens({
-    model: MODEL,
-    system: systemPrompt,
-    messages,
-  });
-  return response.input_tokens;
-}
-
-// ─── Truncate text to stay within token budget ───
-function truncate(text, maxChars = 5000) {
-  if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars) + "\n\n... [truncated — full output in build-report.md] ...";
+// ─── Logging ───
+let logPath = null;
+function log(text) {
+  if (logPath) fs.appendFileSync(logPath, text + "\n");
 }
 
 // ─── Rate limit pacer ───
 const CALL_DELAY_MS = 12_000;
 let lastCallTime = 0;
-
 async function paceCall() {
   const now = Date.now();
   const elapsed = now - lastCallTime;
   if (lastCallTime > 0 && elapsed < CALL_DELAY_MS) {
     const wait = CALL_DELAY_MS - elapsed;
-    const secs = Math.ceil(wait / 1000);
-    process.stdout.write(`  [pacing — ${secs}s cooldown]`);
+    process.stdout.write(`  [pacing ${Math.ceil(wait / 1000)}s...]`);
     await new Promise((r) => setTimeout(r, wait));
-    process.stdout.write("\r" + " ".repeat(40) + "\r");
+    process.stdout.write("\r" + " ".repeat(30) + "\r");
   }
   lastCallTime = Date.now();
 }
 
-// ─── LLM call with retry ───
-async function chat(systemPrompt, messages, maxTokens = DEFAULT_MAX_TOKENS) {
-  const tokens = await estimateTokens(systemPrompt, messages);
-  totalTokens += tokens;
-
-  if (DRY_RUN) {
-    const sysP = systemPrompt.slice(0, 150).replace(/\n/g, " ") + (systemPrompt.length > 150 ? "…" : "");
-    const last = messages[messages.length - 1];
-    const msgP = String(last.content).slice(0, 200).replace(/\n/g, " ") + (String(last.content).length > 200 ? "…" : "");
-    console.log(`  ┌ SYSTEM: ${sysP}`);
-    console.log(`  │ ${last.role.toUpperCase()}: ${msgP}`);
-    console.log(`  └ ~${tokens} tokens (max_output: ${maxTokens})\n`);
-    return "[dry-run — skipped]";
-  }
-  console.log(`  [~${tokens} input tokens, max_output: ${maxTokens}]`);
-
-  for (let attempt = 0; attempt < 7; attempt++) {
-    await paceCall();
+// ─── LLM call ───
+async function chat(systemPrompt, messages, maxTokens = OUTPUT_LIMIT) {
+  await paceCall();
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: maxTokens,
-        system: systemPrompt,
+        system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
         messages,
       });
+      const input = response.usage?.input_tokens ?? 0;
+      const output = response.usage?.output_tokens ?? 0;
+      totalInputTokens += input;
+      totalOutputTokens += output;
       return response.content[0].text;
     } catch (err) {
-      if (err.status === 429 && attempt < 6) {
+      if (err.status === 429 && attempt < 4) {
         const wait = (attempt + 1) * 20;
         console.log(`  [rate limited — waiting ${wait}s...]`);
         await new Promise((r) => setTimeout(r, wait * 1000));
         lastCallTime = Date.now();
-      } else if (err.status === 413 && attempt < 6) {
-        console.log(`  [token limit hit — truncating and retrying...]`);
-        messages = messages.map((m) => ({
-          ...m,
-          content: truncate(m.content, Math.floor(String(m.content).length * 0.6)),
-        }));
       } else {
         throw err;
       }
@@ -146,317 +73,375 @@ async function chat(systemPrompt, messages, maxTokens = DEFAULT_MAX_TOKENS) {
   }
 }
 
-// ─── Dynamic team loader ───
-// Each team lives in departments/<key>/team.json with this shape:
-//
-// {
-//   "head": {
-//     "name": "Alice (Head)",
-//     "system": "You are Alice, the engineering lead..."
-//   },
-//   "pipeline": ["frontend", "backend", "qa"],
-//   "agents": {
-//     "frontend": { "name": "Bob (Frontend)", "system": "You are Bob...", "maxTokens": 4096 },
-//     "backend":  { "name": "Carol (Backend)", "system": "You are Carol..." },
-//     "qa":       { "name": "Dave (QA)", "system": "You are Dave..." }
-//   }
-// }
-//
-// To add a new team: create departments/<key>/team.json — no code changes needed.
+// ─── Built-in Facilitator system prompt ───
+function getFacilitatorSystem() {
+  return `You are the Meeting Facilitator for ${BASE_CONTEXT}
 
-function loadTeam(teamKey) {
-  const configPath = path.join(__dirname, "departments", teamKey, "team.json");
-  if (!fs.existsSync(configPath)) return null;
+You have three jobs. Read which job you are given and execute only that one.
+
+## JOB 1 — Build Initial Agenda
+Input: task description, no round responses yet.
+Output: initial state JSON with contested[] pre-populated from the task.
+No explanation. No markdown fences. Output ONLY valid JSON.
+
+## JOB 2 — Update State After Round
+Input: current state JSON + round responses from agents.
+Output: updated state JSON. 
+Rules:
+- Move contested → agreed only when agents explicitly agree
+- Add new contested items that emerged
+- Update positions under each contested item
+- Add blockers with who waits on whom
+- Add risks with owner + mitigation
+- Update key_moments with 1-2 sentences about what shifted this round
+- Update narrative (max 3 sentences — the spirit of the debate so far)
+No explanation. No markdown fences. Output ONLY valid JSON.
+
+## JOB 3 — Write Agent Brief
+Input: current state JSON + which agent to brief.
+Output: readable plain-text brief for that agent. Format:
+
+## What we've agreed
+[list]
+
+## Still being debated
+[topic — positions so far]
+
+## You are blocked on
+[only blockers relevant to this agent, or "none"]
+
+## Risks on your plate
+[only risks owned by this agent, or "none"]
+
+## Context
+[narrative]
+
+## State Schema — always maintain this exact structure:
+{
+  "agreed": ["string"],
+  "contested": [
+    {
+      "topic": "string",
+      "positions": { "AgentName": "their position" }
+    }
+  ],
+  "commitments": { "AgentName": ["string"] },
+  "blocked": [
+    { "item": "string", "waiting_for": "string", "urgency": "CRITICAL|HIGH|MEDIUM" }
+  ],
+  "risks": [
+    { "risk": "string", "owner": "string", "mitigation": "string" }
+  ],
+  "key_moments": ["string"],
+  "narrative": "string",
+  "open_questions": ["string"]
+}`;
+}
+
+// ─── Agent system prompt wrapper ───
+function getAgentSystem(agent) {
+  return `${agent.system}
+
+## Company Context
+${BASE_CONTEXT}
+
+## Meeting Rules
+- Begin your response directly — never prefix with your name or role
+- Keep responses under 5 sentences
+- Lead with your position. Don't hedge
+- If you disagree, say why specifically
+- End with a question or challenge to keep discussion moving
+- Flag dependencies with [BLOCKED: AgentName]
+- Flag critical risks with [CRITICAL RISK]
+- Flag founder decisions with [FOUNDER DECISION REQUIRED]`;
+}
+
+// ─── Facilitator: build initial agenda ───
+async function facilitatorInitial(task) {
+  const messages = [{
+    role: "user",
+    content: `JOB 1 — Build Initial Agenda\n\nTask: ${task}\n\nBuild the initial debate state JSON based on this task and company context. Pre-populate contested[] with the key technical/operational decisions this task requires.`,
+  }];
+  const reply = await chat(getFacilitatorSystem(), messages, FACILITATOR_LIMIT);
+  return parseJSON(reply, { agreed: [], contested: [], commitments: {}, blocked: [], risks: [], key_moments: [], narrative: "", open_questions: [] });
+}
+
+// ─── Facilitator: update state after round ───
+async function facilitatorUpdate(state, roundReplies) {
+  const messages = [{
+    role: "user",
+    content: `JOB 2 — Update State After Round\n\nCurrent state:\n${JSON.stringify(state, null, 2)}\n\nRound responses:\n${roundReplies.map(r => `[${r.name}]: ${r.reply}`).join("\n\n")}\n\nUpdate the state JSON.`,
+  }];
+  const reply = await chat(getFacilitatorSystem(), messages, FACILITATOR_LIMIT);
+  return parseJSON(reply, state);
+}
+
+// ─── Facilitator: write agent brief ───
+async function facilitatorBrief(state, agentName) {
+  const messages = [{
+    role: "user",
+    content: `JOB 3 — Write Agent Brief\n\nAgent to brief: ${agentName}\n\nCurrent state:\n${JSON.stringify(state, null, 2)}\n\nWrite a readable brief for this agent only.`,
+  }];
+  return await chat(getFacilitatorSystem(), messages, FACILITATOR_LIMIT);
+}
+
+// ─── Safe JSON parse ───
+function parseJSON(text, fallback) {
   try {
-    return JSON.parse(fs.readFileSync(configPath, "utf-8"));
-  } catch (e) {
-    console.error(`Error parsing ${configPath}: ${e.message}`);
-    return null;
+    const clean = text.replace(/```json|```/g, "").trim();
+    return JSON.parse(clean);
+  } catch {
+    console.warn("  ⚠️  Facilitator returned invalid JSON — keeping previous state");
+    return fallback;
   }
 }
 
-function listTeams() {
-  const depDir = path.join(__dirname, "departments");
-  if (!fs.existsSync(depDir)) return [];
-  return fs.readdirSync(depDir).filter((name) => {
-    const cfg = path.join(depDir, name, "team.json");
-    return fs.existsSync(cfg);
-  });
-}
+// ─── Round 0: self-selection ───
+async function runSelfSelection(team, task) {
+  console.log("\n--- Round 0: Self-selection ---");
+  log(`## Round 0 — Self Selection\n`);
 
-// ─── Read team meeting/planning reports for context ───
-function getTeamReport(teamKey) {
-  const candidates = [
-    path.join(__dirname, "departments", teamKey, "team-report.md"),
-    path.join(__dirname, "departments", teamKey, "report.md"),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return fs.readFileSync(p, "utf-8");
+  const relevant = [];
+
+  for (const [agentKey, agent] of Object.entries(team.agents)) {
+    const messages = [{
+      role: "user",
+      content: `Task under discussion: "${task}"\n\nIs this task relevant to your role? Answer in 1-2 sentences. If yes, briefly state your primary concern or contribution. If not relevant, say "Not applicable."`,
+    }];
+
+    const reply = await chat(getAgentSystem(agent), messages, 80);
+    console.log(`  [${agent.name}]: ${reply}`);
+    log(`### ${agent.name}\n\n${reply}\n`);
+
+    const notApplicable = reply.toLowerCase().includes("not applicable");
+    if (!notApplicable) {
+      relevant.push({ key: agentKey, agent });
+      console.log(`  ✓ ${agent.name} joins discussion`);
+    } else {
+      console.log(`  — ${agent.name} sits out`);
+    }
   }
-  return null;
+
+  console.log(`\n  Relevant agents: ${relevant.map(r => r.agent.name).join(", ")}\n`);
+  log(`\n**Relevant agents:** ${relevant.map(r => r.agent.name).join(", ")}\n\n---\n`);
+  return relevant;
 }
 
-// ─── Run a build pipeline ───
-async function runBuild(teamKey, task) {
-  const team = loadTeam(teamKey);
+// ─── Main meeting runner ───
+async function runTeamMeeting(teamKey, task) {
+  const team = TEAMS[teamKey];
   if (!team) {
-    console.error(`Unknown team: "${teamKey}" — no departments/${teamKey}/team.json found.`);
-    const available = listTeams();
-    if (available.length) console.log("Available teams:", available.join(", "));
-    else console.log("No teams found. Create departments/<name>/team.json to add one.");
+    console.error(`Unknown team: "${teamKey}". Available: ${Object.keys(TEAMS).join(", ")}`);
     process.exit(1);
   }
 
+  // ── Setup output directory ──
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const buildDir = path.join(__dirname, "departments", teamKey, "build-runs");
-  fs.mkdirSync(buildDir, { recursive: true });
-  const runDir = path.join(buildDir, timestamp);
-  fs.mkdirSync(runDir, { recursive: true });
-
-  // ── Git: create branch ONLY on real run ──
-  let newBranch = null;
-  if (!DRY_RUN) {
-    const taskSlug = slugify(task);
-    newBranch = gitCreateBranch(teamKey, taskSlug, timestamp);
-    if (!newBranch) {
-      console.error("Aborting: could not create git branch.");
-      process.exit(1);
-    }
-  }
-
-  // Load team report for context
-  const meetingReport = getTeamReport(teamKey);
-  const meetingContext = meetingReport
-    ? `\n\nCONTEXT FROM TEAM REPORT (use this to inform your implementation):\n${truncate(meetingReport, 4000)}\n\n`
-    : "";
+  const outDir = path.join(__dirname, "departments", teamKey, "meetings");
+  fs.mkdirSync(outDir, { recursive: true });
+  logPath = path.join(outDir, `meeting-${timestamp}.md`);
 
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  🔨 ${team.head.name} — BUILD Pipeline`);
+  console.log(`  📋 ${team.head.name} — Team Discussion`);
   console.log(`  Task: ${task}`);
-  console.log(`  Team: ${teamKey} (${team.pipeline.length} agents)`);
-  if (newBranch) console.log(`  Branch: ${newBranch}`);
+  console.log(`  Team: ${teamKey}`);
   console.log(`${"=".repeat(60)}\n`);
 
-  if (meetingReport) console.log(`📋 Loaded team report for context\n`);
+  log(`# Team Meeting — ${team.head.name}`);
+  log(`\n**Date:** ${new Date().toISOString()}`);
+  log(`\n**Team:** ${teamKey}`);
+  log(`\n**Task:** ${task}\n\n---\n`);
 
-  // ── Step 1: Head breaks down the task ──
-  console.log(`[HEAD] Breaking down build task for team...\n`);
-  const agentList = team.pipeline
-    .map((k) => `- ${team.agents[k].name}: what should they build/implement?`)
-    .join("\n");
+  // ── Head opens ──
+  console.log("[HEAD] Opening meeting...\n");
+  const headOpening = await chat(getAgentSystem(team.head), [{
+    role: "user",
+    content: `Open the team discussion for this task: "${task}"\n\nBriefly frame what needs to be decided. What are the key architectural or operational questions the team must resolve before anyone builds anything?`,
+  }], 250);
 
-  const breakdown = await chat(team.head.system, [
-    {
-      role: "user",
-      content: `BUILD TASK for your team: ${task}
-${meetingContext}
-Break this into specific implementation tasks for each of your team members:
-${agentList}
+  console.log(`[${team.head.name}]: ${headOpening}\n`);
+  log(`## Head Opening\n\n${headOpening}\n\n---\n`);
 
-Be specific. Give each agent clear instructions on what code/artifacts to produce. Reference the team report if available.`,
-    },
-  ]);
-  console.log(breakdown);
+  // ── Facilitator builds initial agenda ──
+  console.log("[FACILITATOR] Building initial agenda...\n");
+  let state = await facilitatorInitial(task);
+  log(`## Initial Agenda State\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n---\n`);
 
-  const breakdownPath = path.join(runDir, "0-head-breakdown.md");
-  fs.writeFileSync(breakdownPath, breakdown);
-  gitCommit(
-    [breakdownPath],
-    `[build] ${teamKey}: head breakdown — ${slugify(task, 50)}`
-  );
+  // ── Round 0: self-selection ──
+  const relevantAgents = await runSelfSelection(team, task);
 
-  // ── Step 2: Run pipeline — one commit per agent ──
-  const outputs = {};
+  if (relevantAgents.length === 0) {
+    console.log("No agents selected as relevant. Ending meeting.");
+    return;
+  }
 
-  for (const agentKey of team.pipeline) {
-    const agent = team.agents[agentKey];
-    const agentMaxTokens = agent.maxTokens || DEFAULT_MAX_TOKENS;
-    console.log(`\n${"─".repeat(40)}`);
-    console.log(`[${agent.name.toUpperCase()}] Building... (max ${agentMaxTokens} tokens)\n`);
+  // ── Debate rounds ──
+  for (let round = 1; round <= MAX_ROUNDS; round++) {
+    console.log(`\n--- Round ${round} ---`);
+    log(`## Round ${round}\n`);
 
-    let previousContext = "";
-    for (const [prevKey, prevOutput] of Object.entries(outputs)) {
-      previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${truncate(prevOutput, 3000)}\n`;
+    const roundReplies = [];
+
+    for (const { agent } of relevantAgents) {
+      // Facilitator writes a brief for this agent
+      const brief = await facilitatorBrief(state, agent.name);
+
+      const messages = [{
+        role: "user",
+        content: `${brief}\n\nTask: ${task}\n\nGive your position for this round.`,
+      }];
+
+      const reply = await chat(getAgentSystem(agent), messages);
+      console.log(`\n[${agent.name}]:\n${reply}`);
+      log(`### ${agent.name}\n\n${reply}\n`);
+
+      roundReplies.push({ name: agent.name, reply });
     }
 
-    const agentPrompt = previousContext
-      ? `BUILD TASK from ${team.head.name}:\n${breakdown}\n\nPrevious team outputs:\n${previousContext}\n\nNow build your part. Output actual code and implementation artifacts.`
-      : `BUILD TASK from ${team.head.name}:\n${breakdown}\n\nYou are first in the pipeline. Build your part. Output actual code and implementation artifacts.`;
+    // Facilitator updates state
+    console.log("\n[FACILITATOR] Updating state...");
+    state = await facilitatorUpdate(state, roundReplies);
+    log(`\n**State after round ${round}:**\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n---\n`);
 
-    const output = await chat(agent.system, [{ role: "user", content: agentPrompt }], agentMaxTokens);
-
-    console.log(output);
-    outputs[agentKey] = output;
-
-    const fileIndex = team.pipeline.indexOf(agentKey) + 1;
-    const agentPath = path.join(runDir, `${fileIndex}-${agentKey}.md`);
-    fs.writeFileSync(agentPath, output);
-    gitCommit(
-      [agentPath],
-      `[build] ${teamKey}: ${agent.name} output — ${slugify(task, 40)}`
-    );
+    // Early exit if nothing contested and no blockers
+    if (state.contested.length === 0 && state.blocked.length === 0) {
+      console.log("\n✅ All items resolved — ending debate early.");
+      log(`\n> ✅ All items resolved after round ${round}.\n`);
+      break;
+    }
   }
 
-  // ── Step 3: Head consolidates ──
-  console.log(`\n${"─".repeat(40)}`);
-  console.log(`[HEAD] Reviewing build outputs and writing final report...\n`);
+  // ── Head locks final approach ──
+  console.log("\n[HEAD] Locking final approach...\n");
+  const lockMessages = [{
+    role: "user",
+    content: `Task: ${task}\n\nFinal debate state:\n${JSON.stringify(state, null, 2)}\n\nLock the final approach. Resolve any remaining contested items. Be decisive. What does each agent build, in what order, with what dependencies?`,
+  }];
+  const lockedApproach = await chat(getAgentSystem(team.head), lockMessages, 400);
+  console.log(`[${team.head.name}]:\n${lockedApproach}\n`);
+  log(`## Head — Locked Approach\n\n${lockedApproach}\n\n---\n`);
 
-  let allOutputs = "";
-  for (const [agentKey, output] of Object.entries(outputs)) {
-    allOutputs += `\n## ${team.agents[agentKey].name} Output:\n${truncate(output, 2000)}\n\n---\n`;
-  }
+  // ── Individual agent reports ──
+  console.log("\n--- Writing individual agent reports ---\n");
+  log(`## Individual Agent Reports\n`);
 
-  const finalReport = await chat(team.head.system, [
-    { role: "user", content: `BUILD TASK: ${task}` },
-    { role: "assistant", content: breakdown },
-    {
+  const agentReports = {};
+
+  for (const { key, agent } of relevantAgents) {
+    const messages = [{
       role: "user",
-      content: `Your team has completed their build work. Here are all outputs:\n${allOutputs}\n\nWrite the final build report:
-1. Summary of what was built
-2. Files created/modified by each agent
-3. Any blocking issues found (security, review, QA)
-4. Final verdict: ready to merge? or what needs follow-up?
-5. Handoff notes for other teams`,
-    },
-  ]);
-  console.log(finalReport);
+      content: `Task: ${task}\n\nFinal state:\n${JSON.stringify(state, null, 2)}\n\nLocked approach from Head:\n${lockedApproach}\n\nWrite YOUR individual work report. Include:\n1. What you own in this task\n2. Your specific deliverables\n3. Dependencies — what you need from others before you can start\n4. What others need from you, and when\n5. Risks or concerns you still have\n6. Your estimated effort`,
+    }];
 
-  // ── Save & commit final report ──
-  const reportContent = `# ${team.head.name} — Build Report
+    const report = await chat(getAgentSystem(agent), messages, 350);
+    agentReports[key] = report;
+    console.log(`[${agent.name}] report written`);
+    log(`### ${agent.name}\n\n${report}\n`);
+  }
+
+  // ── Team summary report ──
+  console.log("\n[HEAD] Writing team summary report...\n");
+
+  const allAgentReports = Object.entries(agentReports)
+    .map(([k, r]) => `## ${team.agents[k].name}\n${r}`)
+    .join("\n\n---\n\n");
+
+  const summaryMessages = [{
+    role: "user",
+    content: `Task: ${task}\n\nFinal debate state:\n${JSON.stringify(state, null, 2)}\n\nLocked approach:\n${lockedApproach}\n\nIndividual agent reports:\n${allAgentReports}\n\nWrite the team summary report:\n1. What was decided (architecture, approach, scope)\n2. Who owns what (clear assignments)\n3. Dependency map (who waits on whom)\n4. Unresolved items or risks\n5. What the build session needs to know\n6. Handoff notes for other teams`,
+  }];
+
+  const teamSummary = await chat(getAgentSystem(team.head), summaryMessages, 500);
+  console.log(`[${team.head.name}]:\n${teamSummary}`);
+
+  // ── Save summary report ──
+  const summaryReport = `# Team Meeting Summary — ${team.head.name}
 
 **Date:** ${new Date().toISOString()}
 **Task:** ${task}
 **Team:** ${teamKey}
-**Branch:** ${newBranch ?? "(dry-run)"}
-**Pipeline:** ${team.pipeline.map((k) => team.agents[k].name).join(" → ")}
-**Mode:** BUILD (code implementation)
 
 ---
 
-## Head Breakdown
-${breakdown}
+## Final Debate State
+\`\`\`json
+${JSON.stringify(state, null, 2)}
+\`\`\`
 
 ---
 
-## Pipeline Outputs
-
-${Object.entries(outputs)
-  .map(([k, v]) => `### ${team.agents[k].name}\n${v}`)
-  .join("\n\n---\n\n")}
+## Locked Approach
+${lockedApproach}
 
 ---
 
-## Final Report
-${finalReport}
+## Individual Agent Reports
+
+${allAgentReports}
+
+---
+
+## Team Summary
+${teamSummary}
 `;
 
-  const reportPath = path.join(runDir, "build-report.md");
-  fs.writeFileSync(reportPath, reportContent);
+  const summaryPath = path.join(outDir, `summary-${timestamp}.md`);
+  fs.writeFileSync(summaryPath, summaryReport);
 
-  const latestPath = path.join(__dirname, "departments", teamKey, "build-report.md");
-  fs.writeFileSync(latestPath, reportContent);
+  // Also write as latest for build session to read
+  const latestPath = path.join(__dirname, "departments", teamKey, "team-report.md");
+  fs.writeFileSync(latestPath, summaryReport);
 
-  gitCommit(
-    [reportPath, latestPath],
-    `[build] ${teamKey}: final report — ${slugify(task, 40)}`
-  );
+  log(`\n---\n\n## Team Summary\n\n${teamSummary}\n`);
 
-  // ── Summary ──
+  // ── Cost summary ──
+  const inputCost = ((totalInputTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
   console.log(`\n${"=".repeat(60)}`);
-  console.log(`  ✓ Build report : departments/${teamKey}/build-report.md`);
-  console.log(`  ✓ Run artifacts: departments/${teamKey}/build-runs/${timestamp}/`);
-  if (newBranch) {
-    console.log(`  ✓ Git branch   : ${newBranch}`);
-    console.log(`  ✓ No push — all commits are local only`);
-  }
-  console.log(`${"=".repeat(60)}`);
-  printTokenSummary();
-}
-
-function printTokenSummary() {
-  const cost = ((totalTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  console.log(`\nTotal input tokens: ~${totalTokens}`);
-  console.log(`Estimated input cost: ~$${cost}`);
+  console.log(`  ✓ Meeting log    : departments/${teamKey}/meetings/meeting-${timestamp}.md`);
+  console.log(`  ✓ Summary report : departments/${teamKey}/meetings/summary-${timestamp}.md`);
+  console.log(`  ✓ Latest report  : departments/${teamKey}/team-report.md`);
+  console.log(`  ─`);
+  console.log(`  Input tokens  : ${totalInputTokens.toLocaleString()}`);
+  console.log(`  Output tokens : ${totalOutputTokens.toLocaleString()}`);
+  console.log(`  Est. cost     : ~$${inputCost}`);
+  console.log(`${"=".repeat(60)}\n`);
 }
 
 // ─── CLI ───
 const args = process.argv.slice(2);
-const DRY_RUN_ONLY = args.includes("--dry-run");
-const filteredArgs = args.filter((a) => a !== "--dry-run");
-const teamArg = filteredArgs[0];
-const taskArg = filteredArgs.slice(1).join(" ");
+const teamArg = args[0];
+const taskArg = args.slice(1).join(" ");
 
-function askConfirm(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === "y");
-    });
-  });
-}
+if (!teamArg || !taskArg) {
+  const available = Object.entries(TEAMS).map(([key, t]) => {
+    const agents = Object.values(t.agents).map(a => a.name).join(", ");
+    return `  ${key.padEnd(14)}Head: ${t.head.name}\n                Agents: ${agents}`;
+  }).join("\n\n");
 
-async function main() {
-  if (!teamArg || !taskArg) {
-    // Build team list dynamically from departments/*/team.json
-    const available = listTeams();
-    const teamLines = available.length
-      ? available.map((key) => {
-          const t = loadTeam(key);
-          const pipeline = t?.pipeline?.map((k) => t.agents?.[k]?.name ?? k).join(" → ") ?? "?";
-          const desc = t?.description ? `  ${t.description}` : "";
-          return `  ${key.padEnd(12)}${desc}\n              Pipeline: ${pipeline}`;
-        }).join("\n\n")
-      : "  (none found — add departments/<name>/team.json to create one)";
-
-    const exampleTeam = available[0] ?? "myteam";
-
-    console.log(`
+  console.log(`
 Usage:
-  node team-build.js <team> "<task>"
-  node team-build.js --dry-run <team> "<task>"
+  node team.js <team> "<task>"
 
-Teams (auto-detected from departments/*/team.json):
+Teams:
 
-${teamLines}
+${available}
 
 Examples:
-  node team-build.js ${exampleTeam} "Build the login flow with auth and tests"
-  node team-build.js --dry-run ${exampleTeam} "Add dark mode support"
-
-Add a team:
-  Create departments/<name>/team.json — see README or existing teams for the schema.
+  node team.js tech "Design annotation workspace architecture"
+  node team.js marketing "Plan beta launch for first 5 architects"
+  node team.js operations "Define product curation workflow"
 
 Outputs:
-  departments/<team>/build-report.md           ← latest build report
-  departments/<team>/build-runs/<timestamp>/   ← every run archived
-  git branch: build/<team>/<task-slug>-<ts>    ← local only, never pushed
+  departments/<team>/meetings/meeting-<ts>.md    ← full meeting log
+  departments/<team>/meetings/summary-<ts>.md   ← summary + agent reports
+  departments/<team>/team-report.md             ← latest (read by build session)
 `);
-    process.exit(0);
-  }
-
-  // ── Phase 1: dry-run (no git, no API calls) ──
-  DRY_RUN = true;
-  console.log("\n🔍 DRY RUN — estimating prompts and tokens...\n");
-  await runBuild(teamArg, taskArg);
-
-  const dryTokens = totalTokens;
-  const dryCost = ((dryTokens / 1000) * COST_PER_1K_INPUT).toFixed(4);
-  console.log(`\n——— Dry run complete ———`);
-  console.log(`Estimated input tokens : ~${dryTokens}`);
-  console.log(`Estimated input cost   : ~$${dryCost}`);
-
-  if (DRY_RUN_ONLY) process.exit(0);
-
-  // ── Confirm before real run ──
-  const go = await askConfirm("\nProceed with real build? [y/N] ");
-  if (!go) { console.log("Aborted."); process.exit(0); }
-
-  // ── Phase 2: real run (git branch + commits) ──
-  DRY_RUN = false;
-  totalTokens = 0;
-  console.log("\n🔨 Running build pipeline...\n");
-  await runBuild(teamArg, taskArg);
+  process.exit(0);
 }
 
-main().catch(console.error);
+if (!TEAMS[teamArg]) {
+  console.error(`Unknown team: "${teamArg}". Available: ${Object.keys(TEAMS).join(", ")}`);
+  process.exit(1);
+}
+
+runTeamMeeting(teamArg, taskArg).catch(console.error);
