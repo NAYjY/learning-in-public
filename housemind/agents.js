@@ -13,7 +13,7 @@ STRATEGY:
 - ONE workspace per project
 - The annotation workspace IS the product
 
-MVP SCOPE (Phase 1, 6-8 weeks):
+MVP SCOPE (Phase 1):
 - Image carousel with reference images
 - Emoji annotation system (long-press → 8 emoji types → pin at x,y%)
 - Product linking (tap pin → paste URL → scrape images → pick one)
@@ -21,14 +21,14 @@ MVP SCOPE (Phase 1, 6-8 weeks):
 - Hierarchical projects (main → subprojects)
 - Role-based access: Architect, Contractor, Homeowner, Supplier
 - Role-colored comments
-- Curated reference catalog (~100-150 products)
+- Curated reference catalog (~100-150 products) (solid and prefer to have more, if feedback need more cloud let them add it to the catalog)
 - Categories: tiles/flooring, fixtures/hardware, lighting, cladding
-
-PHASE 1 SKIP:
 - Pricing feeds
 - Revit integration
 - Supplier dashboard
-- Automated scraping pipelines`;
+- Automated scraping pipelines
+
+Phase: MVP. Priority is plan → coordination → decision. Budget and timeline are constraints to acknowledge, not topics to debate.`;
 
 // ─── MEETING AGENTS (for run.js — concise, discussion-focused) ────────────────
 export const meetingAgents = {

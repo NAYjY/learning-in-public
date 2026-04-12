@@ -46,17 +46,34 @@ const MEETING_RULES = {
 };
 
 function buildMeetingRulesBlock() {
-  const format = MEETING_RULES.formatRules.map((r) => `- ${r}`).join("\n");
-  const escalation = MEETING_RULES.escalationProtocol.map((r) => `- ${r}`).join("\n");
+  // const format = MEETING_RULES.formatRules.map((r) => `- ${r}`).join("\n");
+  // const escalation = MEETING_RULES.escalationProtocol.map((r) => `- ${r}`).join("\n");
   const context = loadContext();
 
   return sanitizeForCache(`
 ─── MEETING RULES ───────────────────────────────────────
-FORMAT:
-${format}
+You are [AGENT ROLE] in an executive meeting.
 
-ESCALATION:
-${escalation}
+Format rules:
+- Begin directly with your content. Never prefix with your name or role.
+- Keep responses under 5 sentences unless synthesizing a decision.
+- Lead with your position. Do not hedge.
+- If you disagree, say exactly why — be specific.
+- End every turn with a question or challenge to keep discussion moving.
+- Flag cross-department dependencies: [BLOCKED: ]
+
+Escalation protocol:
+- [FOUNDER DECISION REQUIRED] — only when no agent can own the decision
+- [CRITICAL RISK] — real blockers only, not speculation
+- If scope is unclear, ask — do not assume
+
+Spend policy:
+Prefer inhouse or self-hosted. API calls (Anthropic, OpenAI, Google) and cloud infra serving a live product need are pre-approved. Do not ask for spend approval mid-meeting. Flag only if the cost category is new or exceeds $500/month — and only once.
+
+Timeline rule:
+You may flag a timeline risk once. After flagging, propose an MVP scope reduction or a parallel workstream. Do not repeat the concern without a concrete proposal attached.
+
+Phase: pre-MVP. Priority is plan → coordination → decision. Budget and timeline are constraints to acknowledge, not topics to debate.
 ─────────────────────────────────────────────────────────
 ## BRIEFING — READ BEFORE SPEAKING:\n${context}\n\n---
 ─────────────────────────────────────────────────────────`);
@@ -65,15 +82,6 @@ ${escalation}
 
 function injectMeetingRules(systemPrompt) {
   return `${systemPrompt}\n\n${buildMeetingRulesBlock()}`;
-}
-const agentSystemPrompts = {};
-
-function buildAllSystemPrompts() {
-  for (const agentKey of Object.keys(agents)) {
-    agentSystemPrompts[agentKey] = sanitizeForCache(
-      `${injectMeetingRules(agents[agentKey].system).trimEnd()}\n\n`
-    );
-  }
 }
 
 function getSystemPrompt() {
@@ -416,7 +424,6 @@ async function main() {
   const topic =
     filteredArgs[0] ||
     "What should we build first — supplier onboarding or the owner visualization tool?";
-    buildAllSystemPrompts();
   await checkCacheHealth(agents, injectMeetingRules, client, MODEL);
   // Phase 1: dry-run estimate
   DRY_RUN = true;

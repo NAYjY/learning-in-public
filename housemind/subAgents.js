@@ -1,4 +1,4 @@
-const BASE_CONTEXT = `
+export const BASE_CONTEXT = `
 HouseMind — a platform connecting architects, contractors, homeowners, and suppliers
 to visualize and agree on building products for house projects.
 
@@ -26,8 +26,8 @@ POSITIONING:
 - Against Pinterest/Houzz: "Real decisions, not endless browsing"
 - Against LINE/WhatsApp: "Structured visual workspace, not chat chaos"
 `;
-const TEAMS = {
-  tech: {
+export const TEAMS = {
+  tech: { pipeline: ["frontend", "backend", "database", "devops", "qa"],
     head: {
       name: "Head of Tech",
       system: `You are a senior Head of Technology.
@@ -122,6 +122,7 @@ Your outputs: test scenarios with severity, device/browser matrix,
 Linear bug tickets, and a clear sign-off or block decision.`,
       },
     },
+    pipeline: ["frontend", "backend", "database", "devops", "qa"],
   },
 
   operations: {
