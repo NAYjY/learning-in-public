@@ -96,3 +96,8 @@ With combine agent then call it by name in prompt cache down cost 46%\
 context even better\
 With combine agent then call it by name in prompt and less token limit cache down cost 70%\
 and contect is much much better. sweet\
+
+move to another file try Facilitator not quite work. so tried so back to same procedure.\
+make them seperate task. go the 'Before anyone writes code, I need answers on three things:' so push more 'HARD RULE — NO EXECUTION' on no coding\
+get a promptAgent to do propmt for building task.\
+face error 529: which could happen mid session, cost and gt unuseable output.\
