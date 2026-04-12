@@ -4,7 +4,8 @@ import * as path from "path";
 import * as readline from "readline";
 import { fileURLToPath } from "url";
 import { checkCacheHealth, checkPromptConsistency, sanitizeForCache } from "./cacheHealth.js";
-import { TEAMS } from "./subAgentCompact.js";
+import { BASE_CONTEXT,TEAMS } from "./subAgentCompact.js";
+import { TEAM_MEETING_RULES as MEETING_RULES ,FINAL_ROUND_RULES, promptAgent } from "./MEETINGRULE.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const KEY_FILE = path.join(__dirname, "..", "key.txt");
@@ -17,6 +18,10 @@ const COST_PER_1K_OUTPUT = 0.015;
 
 // ─── TOKEN BUDGET ─────────────────────────────────────────────────────────────
 const MAX_TOKENS_PER_RUN = 250000; // Higher for team pipelines (multiple agents)
+const HEAD_OUTPUT_LIMIT = 2000;
+const AGENT_OUTPUT_LIMIT = 400;
+const AGENT_SUMOUTPUT_LIMIT = 2000;
+const PROMPT_OUTPUT_LIMIT = 2000;
 const MAX_ROUNDS = 3; // For iterative agent pipelines, to prevent infinite loops
 const PHASE_TOKEN_LIMITS = {
   breakdown: 4000,
@@ -36,59 +41,40 @@ let earlyStop = false;
 let DRY_RUN = false;
 
 // ─── MEETING RULES ────────────────────────────────────────────────────────────
-const MEETING_RULES = {
-  timeboxes: {
-    breakdown: "Max 5 minutes. Be decisive, not exhaustive.",
-    agent: "Max 10 minutes per agent. Focus on your specialization only.",
-    consolidate: "Max 10 minutes. Synthesize, don't repeat.",
-    scrum: "Max 5 minutes per exchange. Be direct, flag blockers.",
-  },
-  formatRules: [
-    "Begin your response directly with your content — never prefix with your name or role.",
-    "Keep responses under 5 sentences unless synthesizing.",
-    "Use headers and bullet points. No walls of text.",
-    "Lead with the most important point.",
-    "If uncertain, say so explicitly — don't speculate as fact.",
-    "Flag cross-department dependencies immediately.",
-    "Use concrete examples over abstract descriptions.",
-  ],
-  escalationProtocol: [
-    "If a decision requires the founder, tag with [FOUNDER DECISION REQUIRED].",
-    "If blocked by another department, tag with [BLOCKED: <dept>].",
-    "If a risk is critical, tag with [CRITICAL RISK].",
-    "If scope is unclear, stop and ask — don't assume.",
-  ],
-};
+// const MEETING_RULES = {
+//   timeboxes: {
+//     breakdown: "Max 5 minutes. Be decisive, not exhaustive.",
+//     agent: "Max 10 minutes per agent. Focus on your specialization only.",
+//     consolidate: "Max 10 minutes. Synthesize, don't repeat.",
+//     scrum: "Max 5 minutes per exchange. Be direct, flag blockers.",
+//   },
+//   formatRules: [
+//     "Begin your response directly with your content — never prefix with your name or role.",
+//     "Keep responses under 5 sentences unless synthesizing.",
+//     "Use headers and bullet points. No walls of text.",
+//     "Lead with the most important point.",
+//     "If uncertain, say so explicitly — don't speculate as fact.",
+//     "Flag cross-department dependencies immediately.",
+//     "Use concrete examples over abstract descriptions.",
+//   ],
+//   escalationProtocol: [
+//     "If a decision requires the founder, tag with [FOUNDER DECISION REQUIRED].",
+//     "If blocked by another department, tag with [BLOCKED: <dept>].",
+//     "If a risk is critical, tag with [CRITICAL RISK].",
+//     "If scope is unclear, stop and ask — don't assume.",
+//   ],
+// };
 
-function buildMeetingRulesBlock(phase) {
-  // const timebox = MEETING_RULES.timeboxes[phase] ?? "Stay focused and concise.";
-  // TIMEBOX: ${timebox}
-  const format = MEETING_RULES.formatRules.map((r) => `- ${r}`).join("\n");
-  const escalation = MEETING_RULES.escalationProtocol.map((r) => `- ${r}`).join("\n");
-
-  return `
-─── MEETING RULES ───────────────────────────────────────
-FORMAT RULES:
-${format}
-
-ESCALATION PROTOCOL:
-${escalation}
-─────────────────────────────────────────────────────────`;
+function injectMeetingRules(systemPrompt) {
+  return sanitizeForCache(`${systemPrompt}\n\n${MEETING_RULES}`);
 }
 
-function injectMeetingRules(systemPrompt, phase) {
-  return `${systemPrompt}\n\n${buildMeetingRulesBlock(phase)}`;
-}
-
-function getSystemPrompt(breakdwon,team) {
+function getSystemPrompt(breakdwon,agents) {
   let agentsPromt = ``;
-  for (const agentKey of Object.keys(team.agents)) {
-    const agentData = team.agents[agentKey];
-    agentsPromt = sanitizeForCache(
-      `${agentsPromt}\n\n${agentKey}\t${agentData.system}\n\n`
-    );
+  for (const agentKey of Object.keys(agents)) {
+    agentsPromt = sanitizeForCache(`${agentsPromt}\n\n${agentKey}\t${agents[agentKey].system}\n\n`);
   }
-  return sanitizeForCache(`Team Members:\n${agentsPromt}\n\n${breakdwon}\n\n${buildMeetingRulesBlock()}\n`);
+  return sanitizeForCache(`${BASE_CONTEXT}\n\n${breakdwon}\n\nTeam Members:\n${agentsPromt}\n\n${MEETING_RULES}\n`);
 }
 
 
@@ -172,19 +158,13 @@ async function paceCall() {
 async function estimateTokens(systemPrompt, messages) {
   const response = await client.messages.countTokens({
     model: MODEL,
-    system: [
-      {
-        type: "text",
-        text: systemPrompt,
-        cache_control: { type: "ephemeral" }
-      }
-    ],
+    system: systemPrompt,
     messages: messages,
   });
   return response.input_tokens;
 }
 
-
+// now have too less than 1024 token to the cache hit
 // ─── LLM call with retry ───
 async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unknown", maxTokens = 400 } = {}) {
 
@@ -258,26 +238,26 @@ async function chat(systemPrompt, messages, { teamKey = "unknown", phase = "unkn
 }
 
 // ─── Read other teams' latest reports for cross-team context ───
-function getOtherTeamReports(currentTeamKey) {
-  const otherReports = [];
-  for (const otherKey of Object.keys(TEAMS)) {
-    if (otherKey === currentTeamKey) continue;
-    const reportPath = path.join(__dirname, "departments", otherKey, "team-report.md");
-    if (fs.existsSync(reportPath)) {
-      const content = fs.readFileSync(reportPath, "utf-8");
-      otherReports.push({ team: otherKey, name: TEAMS[otherKey].head.name, content });
-    }
-  }
-  return otherReports;
-}
+// function getOtherTeamReports(currentTeamKey) {
+//   const otherReports = [];
+//   for (const otherKey of Object.keys(TEAMS)) {
+//     if (otherKey === currentTeamKey) continue;
+//     const reportPath = path.join(__dirname, "departments", otherKey, "team-report.md");
+//     if (fs.existsSync(reportPath)) {
+//       const content = fs.readFileSync(reportPath, "utf-8");
+//       otherReports.push({ team: otherKey, name: TEAMS[otherKey].head.name, content });
+//     }
+//   }
+//   return otherReports;
+// }
 
-function formatCrossTeamContext(otherReports) {
-  if (otherReports.length === 0) return "";
-  const sections = otherReports
-    .map((r) => `--- ${r.name} Report (summary) ---\n${truncate(r.content, 2000)}`)
-    .join("\n\n");
-  return `\n\nCONTEXT FROM OTHER DEPARTMENTS:\n${sections}\n\n`;
-}
+// function formatCrossTeamContext(otherReports) {
+//   if (otherReports.length === 0) return "";
+//   const sections = otherReports
+//     .map((r) => `--- ${r.name} Report (summary) ---\n${truncate(r.content, 2000)}`)
+//     .join("\n\n");
+//   return `\n\nCONTEXT FROM OTHER DEPARTMENTS:\n${sections}\n\n`;
+// }
 
 function loadBoardMeetingContext() {
   const parts = [];
@@ -308,6 +288,9 @@ async function runTeam(teamKey, task) {
     process.exit(1);
   }
 
+  const agents = team.agents;
+  await checkCacheHealth(agents, injectMeetingRules, client, MODEL);
+
   initTeamTokens(teamKey);
 
   const teamDir = path.join(__dirname, "departments", teamKey, "team-runs");
@@ -331,7 +314,7 @@ async function runTeam(teamKey, task) {
 
   // ── Phase 1: Head breakdown ──
   console.log(`[HEAD] Breaking down task...\n`);
-  const headSystem = sanitizeForCache(injectMeetingRules(team.head.system, "breakdown"));
+  const headSystem = sanitizeForCache(injectMeetingRules(team.head.system));
   const agentList = team.pipeline
     .map((k) => `- ${team.agents[k].name}: what should they do?`)
     .join("\n");
@@ -342,16 +325,16 @@ async function runTeam(teamKey, task) {
     {
       role: "user",
       content: `Task for your team: ${task}
-From your perspective as ${team.head.name}, 
-specifically what your team tasks from ${boardMeeting}
+From your perspective as ${team.head.name}, We are building ${BASE_CONTEXT}. 
+Specifically what your team tasks from ${boardMeeting}
 Break this into specific sub-tasks for each team member:
 ${agentList}
 Be specific. Give each agent clear instructions.`,
     },
-  ], { teamKey, phase: "breakdown", maxTokens: 400 });
+  ], { teamKey, phase: "breakdown", maxTokens: HEAD_OUTPUT_LIMIT });
 
   console.log(breakdown);
-  fs.writeFileSync(path.join(runDir, "0-head-breakdown.md"), breakdown);
+  if (!DRY_RUN) fs.writeFileSync(path.join(runDir, "0-head-breakdown.md"), breakdown);
 
   if (earlyStop) {
     console.warn("\n⚠️  Early stop after breakdown. Skipping agents.");
@@ -360,16 +343,19 @@ Be specific. Give each agent clear instructions.`,
   }
 
   // ── Phase 2: Run pipeline ──
+  // Build the shared system prompt ONCE after breakdown so every agent call
+  // sends the identical text and Anthropic's prompt cache is hit on all
+  // subsequent calls (same pattern as run.js's top-level fixpromt).
+  const fixpromt = getSystemPrompt(breakdown, agents);
+
   const outputs = {};
   let round = 0;
   const history = [];
-  const fixpromt= getSystemPrompt(breakdown,team);
   while (round < MAX_ROUNDS && !earlyStop) {
     round++;
     console.log(`\n--- Round ${round} ---`);
   for (const agentKey of team.pipeline) {
     if (earlyStop) break;
-     
     const agent = team.agents[agentKey];
     console.log(`\n${"─".repeat(40)}`);
     console.log(`[${agent.name.toUpperCase()}] Working...\n`);
@@ -379,21 +365,21 @@ Be specific. Give each agent clear instructions.`,
     //   previousContext += `\n--- ${team.agents[prevKey].name} Output ---\n${truncate(prevOutput, 1500)}\n`;
     // }
 
-    // const agentSystem = injectMeetingRules(agent.system, "agent");
+    // const agentSystem = injectMeetingRules(agent.system);
     // Let move breake down to system prompt
     
     // const agentPrompt = previousContext
     //   ? `Previous outputs:\n${previousContext}\n\nNow do your part.`
     //   : `You are first. Do your part.`;
     history.push({ role: "user", content: `You are [${agent.name.toUpperCase()}]\nPlan your part.` });
-    const output = await chat(fixpromt, history, { teamKey, phase: "agent" , maxTokens: 150});
+    const output = await chat(fixpromt, history, { teamKey, phase: "agent" , maxTokens: AGENT_OUTPUT_LIMIT });
     history.push({
         role: "assistant",
         content: `${output}`,
       });
     console.log(output);
     outputs[agentKey] = output;
-    fs.writeFileSync(path.join(runDir, `${team.pipeline.indexOf(agentKey) + 1}-${agentKey}.md`), output);
+    if (!DRY_RUN) fs.writeFileSync(path.join(runDir, `${team.pipeline.indexOf(agentKey) + 1}-${agentKey}.md`), output);
   }
 
   if (earlyStop) {
@@ -403,22 +389,56 @@ Be specific. Give each agent clear instructions.`,
   }
 }
 
-  // ── Phase 3: Head consolidates ──
+  // ── Phase 3: Prompt Agent ──
+  let inputprompt = ``;
+  for (const agentKey of team.pipeline) {
+    if (earlyStop) break;
+    const agent = team.agents[agentKey];
+    console.log(`\n${"─".repeat(40)}`);
+    console.log(`[${agent.name.toUpperCase()}] Output summarizing...\n`); 
+
+    const sumprompt=[];
+    sumprompt.push(...history)
+    sumprompt.push({ role: "user", content: `You are ${agent.name.toUpperCase()}\nSummarize your part.\n${FINAL_ROUND_RULES}` });
+    const output = await chat(fixpromt, sumprompt, { teamKey, phase: "agent" , maxTokens: AGENT_SUMOUTPUT_LIMIT });
+
+    inputprompt=`${inputprompt}\n\n${agent.name.toUpperCase()}]:\n${output}\n\n`;
+    console.log(output);
+    outputs[agentKey] = output;
+    if (!DRY_RUN) fs.writeFileSync(path.join(runDir, `${team.pipeline.indexOf(agentKey) + 1}-${agentKey}.md`), output);
+    // const inputContent = fs.readFileSync(path.join(runDir, `${team.pipeline.indexOf(agentKey) + 1}-${agentKey}.md`), "utf-8");
+    // inputprompt=`${inputprompt}\n\n${agent.name.toUpperCase()}]:\n${inputContent}\n\n`;
+  }
+
+
+  console.log(`\n${"─".repeat(40)}`);
+  console.log(`[PromptAgent] Writing Prompt...\n`);
+
+  const teamPrompt = await chat('promptAgent', [{ role: "user", content:`${promptAgent}\n\n This is your input:\n${inputprompt}`}],{ teamKey, phase: "consolidate" , maxTokens: PROMPT_OUTPUT_LIMIT });
+
+  const latestPath = path.join(__dirname, "departments", teamKey, "team-prompt.md");
+  if (!DRY_RUN) fs.writeFileSync(latestPath, teamPrompt);
+
+
+  // ── Phase 4: Head consolidates ──
   console.log(`\n${"─".repeat(40)}`);
   console.log(`[HEAD] Writing final report...\n`);
 
   let allOutputs = "";
   for (const [agentKey, output] of Object.entries(outputs)) {
     allOutputs += `\n## ${team.agents[agentKey].name}:\n${truncate(output, 1000)}\n\n---\n`;
+    // allOutputs += `\n## ${team.agents[agentKey].name}:\n${output}\n\n---\n`;
   }
 
-  const consolidateSystem = injectMeetingRules(team.head.system, "consolidate");
-  const finalReport = await chat(consolidateSystem, [
+  
+  // Reuse fixpromt so the consolidation call also hits the cache written
+  // during Phase 2, rather than creating a new cache entry.
+  const finalReport = await chat(headSystem , [
     { role: "user", content: `Task: ${task}` },
     { role: "assistant", content: breakdown },
-    {
-      role: "user",
-      content: `Team outputs:\n${allOutputs}\n\nWrite final report:
+    { role: "user",
+      content: `Team outputs:\n${allOutputs}\n\n
+
 1. Summary
 2. Each agent's output (brief)
 3. Issues found
@@ -426,40 +446,41 @@ Be specific. Give each agent clear instructions.`,
 5. Deferred items
 6. **HANDOFF** — for each other team (${Object.keys(TEAMS).filter((k) => k !== teamKey).join(", ")}): what they need to know, what you need from them.`,
     },
-  ], { teamKey, phase: "consolidate", maxTokens: 2000 });
+  ], { teamKey, phase: "consolidate", maxTokens: HEAD_OUTPUT_LIMIT });
 
   console.log(finalReport);
 
   const reportContent = `# ${team.head.name} — Team Report
 
-**Date:** ${new Date().toISOString()}
-**Task:** ${task}
-**Pipeline:** ${team.pipeline.map((k) => team.agents[k].name).join(" → ")}
+                          **Date:** ${new Date().toISOString()}
+                          **Task:** ${task}
+                          **Pipeline:** ${team.pipeline.map((k) => team.agents[k].name).join(" → ")}
 
----
+                          ---
 
-## Head Breakdown
-${breakdown}
+                          ## Head Breakdown
+                          ${breakdown}
 
----
+                          ---
 
-## Pipeline Outputs
+                          ## Pipeline Outputs
 
-${Object.entries(outputs)
-  .map(([k, v]) => `### ${team.agents[k].name}\n${v}`)
-  .join("\n\n---\n\n")}
+                          ${Object.entries(outputs)
+                            .map(([k, v]) => `### ${team.agents[k].name}\n${v}`)
+                            .join("\n\n---\n\n")}
 
----
+                          ---
 
-## Final Report
-${finalReport}
-`;
+                          ## Final Report
+                          ${finalReport}
+                          `;
 
-  fs.writeFileSync(path.join(runDir, "final-report.md"), reportContent);
-  const latestPath = path.join(__dirname, "departments", teamKey, "team-report.md");
-  fs.writeFileSync(latestPath, reportContent);
+  if (!DRY_RUN) fs.writeFileSync(path.join(runDir, "final-report.md"), reportContent);
+  // const latestPath = path.join(__dirname, "departments", teamKey, "team-report.md");
+  if (!DRY_RUN) fs.writeFileSync(latestPath, reportContent);
 
   console.log(`\n${"=".repeat(60)}`);
+  console.log(`  ✓ Report: departments/${teamKey}/team-prompt.md`);
   console.log(`  ✓ Report: departments/${teamKey}/team-report.md`);
   console.log(`  ✓ Artifacts: departments/${teamKey}/team-runs/${timestamp}/`);
   console.log(`${"=".repeat(60)}`);
@@ -537,8 +558,8 @@ ${finalReport}
 //     console.log(`${"─".repeat(50)}`);
 //     log += `## ${pair.label}\n**Focus:** ${pair.topic}\n\n`;
 
-//     const systemA = injectMeetingRules(agentA.system, "scrum");
-//     const systemB = injectMeetingRules(agentB.system, "scrum");
+//     const systemA = injectMeetingRules(agentA.system);
+//     const systemB = injectMeetingRules(agentB.system);
 
 //     // Round 1
 //     console.log(`\n[${pair.a.name}] →`);
@@ -663,7 +684,7 @@ function resetState() {
 
 async function main() {
   if ((teamArg === "scrum" && taskArg) || (teamArg && taskArg)) {
-    await checkCacheHealth(TEAMS, injectMeetingRules, client, MODEL);
+    
     // Dry run
     DRY_RUN = true;
     console.log("\n🔍 DRY RUN — estimating tokens...\n");
