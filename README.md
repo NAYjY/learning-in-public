@@ -100,4 +100,15 @@ and contect is much much better. sweet\
 move to another file try Facilitator not quite work. so tried so back to same procedure.\
 make them seperate task. go the 'Before anyone writes code, I need answers on three things:' so push more 'HARD RULE — NO EXECUTION' on no coding\
 get a promptAgent to do propmt for building task.\
-face error 529: which could happen mid session, cost and gt unuseable output.\
+face error 529: which could happen mid session, cost and get unuseable output.\
+
+Get the prompt for build.\
+
+## PHASE4
+i see that the building output would be so huge. so i switch to Claude.ai free\
+use agent that alraedy in project each chat to build each part.\
+
+Now that i have the code. not that i trust it. I have to review it all even after ai review. What a work.
+
+take time due limit but i's fine. it's on sacial holiday so i just run it and go out. push it when quota clear through mobile.\
+Add skills to Claude.ai \
