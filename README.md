@@ -112,3 +112,11 @@ Now that i have the code. not that i trust it. I have to review it all even afte
 
 take time due limit but i's fine. it's on sacial holiday so i just run it and go out. push it when quota clear through mobile.\
 Add skills to Claude.ai \
+senior-frontend, senior-back-end,senior-data-engineer,senior-devop,senior-qa from https://github.com/davila7/claude-code-templates \
+face token limit at output... for serveral times so ask it to zip. It pass.\
+
+Now the real deal\
+THE REAL WORK\
+READ IT!!!!
+
+So I create code-walkthrough skill. Let see if it make this easy.
